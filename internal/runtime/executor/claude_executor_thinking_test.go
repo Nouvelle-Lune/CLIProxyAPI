@@ -26,6 +26,14 @@ func TestShouldReplayClaudeThinkingForDeepSeek_ScopesToDeepSeekThinking(t *testi
 	if shouldReplayClaudeThinkingForDeepSeek("deepseek/deepseek-v4-pro", "http://127.0.0.1:8317", []byte(`{}`)) {
 		t.Fatalf("expected requests without thinking mode to skip replay")
 	}
+	// output_config.effort alone triggers replay (no thinking.type field needed).
+	bodyWithEffort := []byte(`{"output_config":{"effort":"max"}}`)
+	if !shouldReplayClaudeThinkingForDeepSeek("deepseek/deepseek-v4-flash", "http://127.0.0.1:8317", bodyWithEffort) {
+		t.Fatalf("expected output_config.effort to enable replay")
+	}
+	if shouldReplayClaudeThinkingForDeepSeek("deepseek/deepseek-v4-flash", "http://127.0.0.1:8317", []byte(`{"output_config":{}}`)) {
+		t.Fatalf("expected empty output_config to skip replay")
+	}
 }
 
 func TestReplayClaudeThinkingForToolUse_NoCachedThinkingReturnsLocalError(t *testing.T) {
