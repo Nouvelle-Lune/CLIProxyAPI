@@ -2243,6 +2243,295 @@ func TestRestoreClaudeOAuthToolNamesFromResponse_MixedCaseWithPrefix(t *testing.
 	}
 }
 
+func TestFixClaudeResponseModel_NonStream_ReplacesModel(t *testing.T) {
+	response := []byte(`{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"deepseek-v4-pro","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`)
+	requestModel := "deepseek/deepseek-v4-pro"
+
+	out := fixClaudeResponseModel(response, requestModel)
+
+	if got := gjson.GetBytes(out, "model").String(); got != requestModel {
+		t.Fatalf("model = %q, want %q", got, requestModel)
+	}
+	// Verify other fields are preserved
+	if got := gjson.GetBytes(out, "id").String(); got != "msg_01" {
+		t.Fatalf("id changed to %q", got)
+	}
+	if got := gjson.GetBytes(out, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason changed to %q", got)
+	}
+}
+
+func TestFixClaudeResponseModel_NonStream_ModelAlreadyMatches(t *testing.T) {
+	response := []byte(`{"model":"claude-sonnet-4-20250514","type":"message"}`)
+
+	out := fixClaudeResponseModel(response, "claude-sonnet-4-20250514")
+
+	if got := gjson.GetBytes(out, "model").String(); got != "claude-sonnet-4-20250514" {
+		t.Fatalf("model = %q", got)
+	}
+}
+
+func TestFixClaudeResponseModel_NonStream_NoModelField(t *testing.T) {
+	response := []byte(`{"id":"msg_01","type":"message"}`)
+
+	out := fixClaudeResponseModel(response, "deepseek/deepseek-v4-pro")
+
+	if got := gjson.GetBytes(out, "model").String(); got != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("model = %q, want %q", got, "deepseek/deepseek-v4-pro")
+	}
+}
+
+func TestFixClaudeResponseModel_NonStream_PreservesAllFields(t *testing.T) {
+	response := []byte(`{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"Hello"}],"model":"deepseek-v4-pro","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":5}}`)
+
+	out := fixClaudeResponseModel(response, "deepseek/deepseek-v4-pro")
+
+	if got := gjson.GetBytes(out, "content.0.text").String(); got != "Hello" {
+		t.Fatalf("content changed to %q", got)
+	}
+	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got != 10 {
+		t.Fatalf("usage changed to %d", got)
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_MessageStart_ReplacesMessageModel(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"deepseek-v4-pro","stop_reason":"end_turn","stop_sequence":null}}`)
+	requestModel := "deepseek/deepseek-v4-pro"
+
+	out := fixClaudeResponseModel(line, requestModel)
+
+	// Output should still be valid SSE
+	if !bytes.HasPrefix(out, []byte("data: ")) {
+		t.Fatalf("output missing SSE prefix, got: %s", string(out))
+	}
+	payload := out[len("data: "):]
+	if got := gjson.GetBytes(payload, "message.model").String(); got != requestModel {
+		t.Fatalf("message.model = %q, want %q, full payload: %s", got, requestModel, string(payload))
+	}
+	if got := gjson.GetBytes(payload, "message.id").String(); got != "msg_01" {
+		t.Fatalf("message.id changed to %q", got)
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_MessageDelta_NotModified(t *testing.T) {
+	line := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`)
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if !bytes.Equal(out, line) {
+		t.Fatalf("message_delta line modified: got %q, want %q", string(out), string(line))
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_ContentBlockDelta_NotModified(t *testing.T) {
+	line := []byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`)
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if !bytes.Equal(out, line) {
+		t.Fatalf("content_block_delta line modified: got %q, want %q", string(out), string(line))
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_PingEvent_NotModified(t *testing.T) {
+	line := []byte(`data: {"type":"ping"}`)
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if !bytes.Equal(out, line) {
+		t.Fatalf("ping line modified: got %q, want %q", string(out), string(line))
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_DoneEvent_NotModified(t *testing.T) {
+	line := []byte(`data: [DONE]`)
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if !bytes.Equal(out, line) {
+		t.Fatalf("[DONE] line modified: got %q, want %q", string(out), string(line))
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_EmptyData_NotModified(t *testing.T) {
+	line := []byte("data: \n")
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if !bytes.Equal(out, line) {
+		t.Fatalf("empty data line modified: got %q, want %q", string(out), string(line))
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_MalformedJSON_NotModified(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"model":"deepseek-v4-pro"`)
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if !bytes.Equal(out, line) {
+		t.Fatalf("malformed JSON line modified: got %q, want %q", string(out), string(line))
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_MixedEventsOnlyFixesMessageStart(t *testing.T) {
+	input := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"model\":\"deepseek-v4-pro\"}}\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Hello\"}}\n" +
+		"data: {\"type\":\"ping\"}\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n")
+
+	out := fixClaudeResponseModel(input, "deepseek/deepseek-v4-pro")
+
+	lines := bytes.Split(out, []byte("\n"))
+	// First line: message_start should have model replaced
+	if !bytes.Contains(lines[0], []byte(`"model":"deepseek/deepseek-v4-pro"`)) {
+		t.Fatalf("first line model not replaced, got: %s", string(lines[0]))
+	}
+	// Other lines should be untouched
+	expectedLines := bytes.Split(input, []byte("\n"))
+	for i := 1; i < len(lines)-1; i++ {
+		if len(bytes.TrimSpace(lines[i])) == 0 {
+			continue
+		}
+		if !bytes.Equal(lines[i], expectedLines[i]) {
+			t.Fatalf("line %d modified:\n  got:  %q\n  want: %q", i, string(lines[i]), string(expectedLines[i]))
+		}
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_MessageStart_TrailingNewlinePreserved(t *testing.T) {
+	line := []byte("data: {\"type\":\"message_start\",\"message\":{\"model\":\"deepseek-v4-pro\"}}\n")
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if len(out) == 0 || out[len(out)-1] != '\n' {
+		t.Fatalf("trailing newline not preserved, output ends with: %q", out[len(out)-1:])
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_MessageStart_NoTrailingNewline(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"model":"deepseek-v4-pro"}}`)
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if len(out) > 0 && out[len(out)-1] == '\n' {
+		t.Fatalf("unexpected trailing newline added")
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_LeadingWhitespacePreserved(t *testing.T) {
+	line := []byte("  data: {\"type\":\"message_start\",\"message\":{\"model\":\"deepseek-v4-pro\"}}\n")
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if !bytes.HasPrefix(out, []byte("  ")) {
+		t.Fatalf("leading whitespace not preserved, got: %q", string(out))
+	}
+	// Model should still be replaced
+	if !bytes.Contains(out, []byte(`"model":"deepseek/deepseek-v4-pro"`)) {
+		t.Fatalf("model not replaced, got: %s", string(out))
+	}
+}
+
+func TestFixClaudeResponseModel_EmptyInput(t *testing.T) {
+	out := fixClaudeResponseModel([]byte{}, "deepseek/deepseek-v4-pro")
+	if len(out) != 0 {
+		t.Fatalf("expected empty output, got: %q", string(out))
+	}
+}
+
+func TestFixClaudeResponseModel_PlainTextInput(t *testing.T) {
+	input := []byte("some random text")
+	out := fixClaudeResponseModel(input, "deepseek/deepseek-v4-pro")
+	if !bytes.Equal(out, input) {
+		t.Fatalf("plain text modified: got %q, want %q", string(out), string(input))
+	}
+}
+
+func TestFixClaudeResponseModel_NonStream_WhitespacePrefix(t *testing.T) {
+	// JSON with leading whitespace should still be detected as JSON
+	input := []byte("  {\"model\":\"deepseek-v4-pro\",\"id\":\"msg_01\"}")
+	out := fixClaudeResponseModel(input, "deepseek/deepseek-v4-pro")
+	if got := gjson.GetBytes(out, "model").String(); got != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("model = %q, want %q", got, "deepseek/deepseek-v4-pro")
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_NotDataLine_NotModified(t *testing.T) {
+	// Lines that don't start with "data:" should not be processed
+	line := []byte("event: message\n")
+
+	out := fixClaudeResponseModel(line, "deepseek/deepseek-v4-pro")
+
+	if !bytes.Equal(out, line) {
+		t.Fatalf("non-data line modified: got %q, want %q", string(out), string(line))
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_MessageStart_DoesNotModifyNestedContentModel(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"id":"msg_01","model":"deepseek-v4-pro","content":[{"type":"tool_use","name":"deepseek-v4-pro","input":{}}]}}`)
+	requestModel := "deepseek/deepseek-v4-pro"
+
+	out := fixClaudeResponseModel(line, requestModel)
+
+	payload := out[len("data: "):]
+	// The top-level message.model should be replaced
+	if got := gjson.GetBytes(payload, "message.model").String(); got != requestModel {
+		t.Fatalf("message.model = %q, want %q", got, requestModel)
+	}
+	// The nested tool_use name should NOT be affected
+	if got := gjson.GetBytes(payload, "message.content.0.name").String(); got != "deepseek-v4-pro" {
+		t.Fatalf("nested tool_use name changed: got %q, want %q", got, "deepseek-v4-pro")
+	}
+}
+
+func TestFixClaudeResponseModel_NonStream_Strips1mSuffixWhenResponseLacksIt(t *testing.T) {
+	// When requestModel has [1m] but upstream response does not, [1m] should be stripped
+	response := []byte(`{"id":"msg_01","type":"message","model":"deepseek-v4-pro","stop_reason":"end_turn"}`)
+	requestModel := "claude-sonnet-4-20250514[1m]"
+
+	out := fixClaudeResponseModel(response, requestModel)
+
+	if got := gjson.GetBytes(out, "model").String(); got != "claude-sonnet-4-20250514" {
+		t.Fatalf("model = %q, want %q (without [1m] suffix)", got, "claude-sonnet-4-20250514")
+	}
+}
+
+func TestFixClaudeResponseModel_NonStream_Preserves1mSuffixWhenResponseHasIt(t *testing.T) {
+	// When both requestModel and upstream response have [1m], preserve it
+	response := []byte(`{"id":"msg_01","type":"message","model":"claude-sonnet-4-20250514[1m]","stop_reason":"end_turn"}`)
+	requestModel := "claude-sonnet-4-20250514[1m]"
+
+	out := fixClaudeResponseModel(response, requestModel)
+
+	if got := gjson.GetBytes(out, "model").String(); got != "claude-sonnet-4-20250514[1m]" {
+		t.Fatalf("model = %q, want %q (with [1m] preserved)", got, "claude-sonnet-4-20250514[1m]")
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_Strips1mSuffixWhenResponseLacksIt(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"id":"msg_01","model":"deepseek-v4-pro"}}`)
+	requestModel := "claude-sonnet-4-20250514[1m]"
+
+	out := fixClaudeResponseModel(line, requestModel)
+
+	payload := out[len("data: "):]
+	if got := gjson.GetBytes(payload, "message.model").String(); got != "claude-sonnet-4-20250514" {
+		t.Fatalf("message.model = %q, want %q (without [1m] suffix)", got, "claude-sonnet-4-20250514")
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_Preserves1mSuffixWhenResponseHasIt(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"id":"msg_01","model":"claude-sonnet-4-20250514[1m]"}}`)
+	requestModel := "claude-sonnet-4-20250514[1m]"
+
+	out := fixClaudeResponseModel(line, requestModel)
+
+	payload := out[len("data: "):]
+	if got := gjson.GetBytes(payload, "message.model").String(); got != "claude-sonnet-4-20250514[1m]" {
+		t.Fatalf("message.model = %q, want %q (with [1m] preserved)", got, "claude-sonnet-4-20250514[1m]")
+	}
+}
+
 func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testing.T) {
 	reverseMap := map[string]string{"Glob": "glob"}
 

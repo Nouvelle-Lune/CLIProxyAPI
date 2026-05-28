@@ -315,6 +315,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		data,
 		&param,
 	)
+	out = fixClaudeResponseModel(out, req.Model)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -488,6 +489,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}
+				line = fixClaudeResponseModel(line, req.Model)
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
@@ -552,6 +554,83 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// fixClaudeResponseModel ensures the response model name matches the request model name.
+// When DeepSeek returns "deepseek-v4-pro" but the client requested "deepseek/deepseek-v4-pro",
+// Claude Code interprets the model mismatch as invalid and discards thinking blocks from
+// conversation history. Matching the model names prevents this and keeps thinking intact.
+func fixClaudeResponseModel(data []byte, requestModel string) []byte {
+	// The [1m] suffix is Anthropic-specific context window notation. When the upstream
+	// response does not include [1m], the target model should not include it either.
+	resolveTarget := func(oldModel string) string {
+		cleanModel := strings.TrimSuffix(requestModel, "[1m]")
+		if cleanModel != requestModel && !strings.HasSuffix(oldModel, "[1m]") {
+			return cleanModel
+		}
+		return requestModel
+	}
+
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		// Non-streaming JSON response: replace top-level model field
+		oldModel := gjson.GetBytes(data, "model").String()
+		targetModel := resolveTarget(oldModel)
+		if oldModel == targetModel {
+			return data
+		}
+		fixed, err := sjson.SetBytes(data, "model", targetModel)
+		if err != nil {
+			return data
+		}
+		return fixed
+	}
+
+	// SSE data (single line or multi-line): fix model in message_start events
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	var result []byte
+	for _, line := range lines {
+		if len(bytes.TrimSpace(line)) == 0 {
+			result = append(result, line...)
+			continue
+		}
+		trimmedLine := bytes.TrimSpace(line)
+		if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
+			result = append(result, line...)
+			continue
+		}
+		payload := bytes.TrimSpace(trimmedLine[len("data:"):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !gjson.ValidBytes(payload) {
+			result = append(result, line...)
+			continue
+		}
+		root := gjson.ParseBytes(payload)
+		if root.Get("type").String() != "message_start" {
+			result = append(result, line...)
+			continue
+		}
+		oldModel := root.Get("message.model").String()
+		targetModel := resolveTarget(oldModel)
+		if oldModel == targetModel {
+			result = append(result, line...)
+			continue
+		}
+		fixed, err := sjson.SetBytes(payload, "message.model", targetModel)
+		if err != nil {
+			result = append(result, line...)
+			continue
+		}
+		// Reconstruct the SSE line preserving original leading whitespace
+		prefixLen := len(line) - len(bytes.TrimLeft(line, " \t"))
+		result = append(result, line[:prefixLen]...)
+		result = append(result, []byte("data: ")...)
+		result = append(result, fixed...)
+		// Preserve the trailing newline if the original line had one
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			result = append(result, '\n')
+		}
+	}
+	return result
 }
 
 func validateClaudeStreamingResponse(data []byte) error {
