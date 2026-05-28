@@ -54,6 +54,11 @@ func TestNormalizeClaudeThinkingForToolUse_WithToolUseNoThinking(t *testing.T) {
 	if thinkingText.String() != "[reasoning unavailable]" {
 		t.Fatalf("expected '[reasoning unavailable]', got %s", thinkingText.String())
 	}
+	// Verify signature field exists (DeepSeek requires it)
+	signature := gjson.GetBytes(result, "messages.1.content.0.signature")
+	if !signature.Exists() {
+		t.Fatalf("expected signature field to exist in thinking block")
+	}
 }
 
 func TestNormalizeClaudeThinkingForToolUse_WithToolUseAndThinking(t *testing.T) {

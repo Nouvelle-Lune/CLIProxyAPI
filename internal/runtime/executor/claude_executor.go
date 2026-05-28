@@ -2453,7 +2453,7 @@ func normalizeClaudeThinkingForToolUse(body []byte) []byte {
 			}
 
 			// Prepend thinking block to content array
-			thinkingBlock := []byte(`{"type":"thinking","thinking":""}`)
+			thinkingBlock := []byte(`{"type":"thinking","thinking":"","signature":""}`)
 			thinkingBlock, _ = sjson.SetBytes(thinkingBlock, "thinking", fallbackThinking)
 
 			// Rebuild the content array with thinking block prepended
