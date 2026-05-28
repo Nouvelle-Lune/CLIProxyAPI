@@ -9,7 +9,7 @@ import (
 )
 
 func resetClaudeThinkingReplayStore() {
-	deepSeekClaudeThinkingReplay = &claudeThinkingReplayStore{items: make(map[string]string)}
+	deepSeekClaudeThinkingReplay = &claudeThinkingReplayStore{items: make(map[string]string), latestByScope: make(map[string]string)}
 }
 
 func TestShouldReplayClaudeThinkingForDeepSeek_ScopesToDeepSeekThinking(t *testing.T) {
@@ -28,15 +28,12 @@ func TestShouldReplayClaudeThinkingForDeepSeek_ScopesToDeepSeekThinking(t *testi
 	}
 }
 
-func TestReplayClaudeThinkingForToolUse_NoCachedThinkingLeavesBodyUnchanged(t *testing.T) {
+func TestReplayClaudeThinkingForToolUse_NoCachedThinkingReturnsLocalError(t *testing.T) {
 	resetClaudeThinkingReplayStore()
 	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"ToolSearch","input":{"query":"x"}}]}]}`)
-	result, err := replayClaudeThinkingForToolUse(body, "scope")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(result) != string(body) {
-		t.Fatalf("expected unchanged body without cached thinking, got %s", result)
+	_, err := replayClaudeThinkingForToolUse(body, "scope")
+	if err == nil {
+		t.Fatalf("expected missing thinking to return a local error")
 	}
 }
 
@@ -131,57 +128,69 @@ func TestClaudeThinkingStreamReplayRecorder_StoresThinkingForLaterReplay(t *test
 	}
 }
 
-func TestClaudeThinkingReplayScope_IsolatesSessionAuthModelAndBaseURL(t *testing.T) {
-	baseOpts := cliproxyexecutor.Options{Headers: map[string][]string{"X-Claude-Code-Session-Id": {"session-1"}}}
-	baseAuth := &cliproxyauth.Auth{ID: "auth-1"}
-	baseScope := claudeThinkingReplayScope(baseAuth, baseOpts, "deepseek/deepseek-v4-pro", "http://127.0.0.1:8317")
-	if baseScope == "" {
+func TestReplayClaudeThinkingForToolUse_FallsBackToScopeLatestWhenToolIDMisses(t *testing.T) {
+	resetClaudeThinkingReplayStore()
+	scope := "session-1"
+	rememberClaudeThinkingForToolUseFromResponse([]byte(`{"content":[{"type":"thinking","thinking":"scope latest","signature":"sig-scope"},{"type":"tool_use","id":"call_1","name":"ToolSearch","input":{}}]}`), scope)
+
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_2","name":"Agent","input":{}}]}]}`)
+	result, err := replayClaudeThinkingForToolUse(body, scope)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(result, "messages.0.content.0.thinking").String(); got != "scope latest" {
+		t.Fatalf("thinking = %q, want scope latest", got)
+	}
+}
+
+func TestReplayClaudeThinkingForToolUse_PrefersExactToolIDOverLatestThinking(t *testing.T) {
+	resetClaudeThinkingReplayStore()
+	scope := "session-1"
+	rememberClaudeThinkingForToolUseFromResponse([]byte(`{"content":[{"type":"thinking","thinking":"exact thinking","signature":"sig-exact"},{"type":"tool_use","id":"call_1","name":"ToolSearch","input":{}}]}`), scope)
+	rememberClaudeThinkingForToolUseFromResponse([]byte(`{"content":[{"type":"thinking","thinking":"newer scope thinking","signature":"sig-newer"},{"type":"tool_use","id":"call_2","name":"ToolSearch","input":{}}]}`), scope)
+	rememberClaudeThinkingForToolUseFromResponse([]byte(`{"content":[{"type":"thinking","thinking":"global thinking","signature":"sig-global"},{"type":"tool_use","id":"call_3","name":"ToolSearch","input":{}}]}`), "other-session")
+
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"ToolSearch","input":{}}]}]}`)
+	result, err := replayClaudeThinkingForToolUse(body, scope)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(result, "messages.0.content.0.thinking").String(); got != "exact thinking" {
+		t.Fatalf("thinking = %q, want exact thinking", got)
+	}
+}
+
+func TestReplayClaudeThinkingForToolUse_FallsBackToGlobalLatestAcrossSubagentScope(t *testing.T) {
+	resetClaudeThinkingReplayStore()
+	rememberClaudeThinkingForToolUseFromResponse([]byte(`{"content":[{"type":"thinking","thinking":"global latest","signature":"sig-global"},{"type":"tool_use","id":"call_1","name":"ToolSearch","input":{}}]}`), "parent-session")
+
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_subagent","name":"Agent","input":{}}]}]}`)
+	result, err := replayClaudeThinkingForToolUse(body, "subagent-session")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(result, "messages.0.content.0.thinking").String(); got != "global latest" {
+		t.Fatalf("thinking = %q, want global latest", got)
+	}
+}
+
+func TestClaudeThinkingReplayStore_PutInitializesLatestByScope(t *testing.T) {
+	store := &claudeThinkingReplayStore{items: make(map[string]string)}
+	store.put("scope", "", `{"type":"thinking","thinking":"latest","signature":"sig"}`)
+
+	got, ok := store.get("scope", "missing")
+	if !ok {
+		t.Fatalf("expected latest thinking to be available")
+	}
+	if gjson.Get(got, "thinking").String() != "latest" {
+		t.Fatalf("thinking = %q, want latest", got)
+	}
+}
+
+func TestClaudeThinkingReplayScope_UsesSessionHeader(t *testing.T) {
+	opts := cliproxyexecutor.Options{Headers: map[string][]string{"X-Claude-Code-Session-Id": {"session-1"}}}
+	scope := claudeThinkingReplayScope(&cliproxyauth.Auth{ID: "auth-1"}, opts, "deepseek/deepseek-v4-pro", "http://127.0.0.1:8317")
+	if scope == "" {
 		t.Fatalf("expected non-empty scope")
-	}
-
-	cases := []struct {
-		name      string
-		auth      *cliproxyauth.Auth
-		opts      cliproxyexecutor.Options
-		baseModel string
-		baseURL   string
-	}{
-		{
-			name:      "session",
-			auth:      baseAuth,
-			opts:      cliproxyexecutor.Options{Headers: map[string][]string{"X-Claude-Code-Session-Id": {"session-2"}}},
-			baseModel: "deepseek/deepseek-v4-pro",
-			baseURL:   "http://127.0.0.1:8317",
-		},
-		{
-			name:      "auth",
-			auth:      &cliproxyauth.Auth{ID: "auth-2"},
-			opts:      baseOpts,
-			baseModel: "deepseek/deepseek-v4-pro",
-			baseURL:   "http://127.0.0.1:8317",
-		},
-		{
-			name:      "model",
-			auth:      baseAuth,
-			opts:      baseOpts,
-			baseModel: "deepseek/deepseek-v4-lite",
-			baseURL:   "http://127.0.0.1:8317",
-		},
-		{
-			name:      "baseURL",
-			auth:      baseAuth,
-			opts:      baseOpts,
-			baseModel: "deepseek/deepseek-v4-pro",
-			baseURL:   "https://api.deepseek.com/anthropic",
-		},
-	}
-
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			got := claudeThinkingReplayScope(tt.auth, tt.opts, tt.baseModel, tt.baseURL)
-			if got == baseScope {
-				t.Fatalf("expected %s change to produce isolated scope", tt.name)
-			}
-		})
 	}
 }
