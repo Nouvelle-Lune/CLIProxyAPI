@@ -31,7 +31,15 @@ func shouldReplayClaudeThinkingForDeepSeek(baseModel, baseURL string, body []byt
 	}
 
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
-	return thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto"
+	if thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto" {
+		return true
+	}
+
+	// output_config.effort implies thinking mode even without an explicit
+	// thinking.type field. DeepSeek interprets effort as active thinking
+	// and requires content[].thinking passback for tool_use turns.
+	effort := strings.TrimSpace(gjson.GetBytes(body, "output_config.effort").String())
+	return effort != ""
 }
 
 func claudeThinkingReplayScope(auth *cliproxyauth.Auth, opts cliproxyexecutor.Options, baseModel, baseURL string) string {
