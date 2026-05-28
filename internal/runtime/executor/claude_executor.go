@@ -342,6 +342,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
+	// Ensure thinking content blocks are preserved for assistant messages with tool_use.
+	// DeepSeek's Anthropic endpoint requires content[].thinking to be passed back when
+	// thinking mode is enabled and tool calls are present.
+	body = normalizeClaudeThinkingForToolUse(body)
+
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
