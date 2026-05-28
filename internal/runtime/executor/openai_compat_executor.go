@@ -22,6 +22,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -116,6 +117,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
+	}
+
+	if shouldReplayOpenAIReasoningForDeepSeek(baseModel, baseURL, translated) {
+		translated, err = normalizeDeepSeekReasoningContent(translated)
+		if err != nil {
+			return resp, err
+		}
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -311,6 +319,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
+	}
+
+	if shouldReplayOpenAIReasoningForDeepSeek(baseModel, baseURL, translated) {
+		translated, err = normalizeDeepSeekReasoningContent(translated)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -781,5 +796,70 @@ func (e statusErr) Error() string {
 	}
 	return fmt.Sprintf("status %d", e.code)
 }
-func (e statusErr) StatusCode() int            { return e.code }
+func (e statusErr) StatusCode() int { return e.code }
+
+func shouldReplayOpenAIReasoningForDeepSeek(baseModel, baseURL string, body []byte) bool {
+	providerKey := strings.ToLower(strings.TrimSpace(baseModel + " " + baseURL))
+	if !strings.Contains(providerKey, "deepseek") {
+		return false
+	}
+	return gjson.GetBytes(body, "reasoning_effort").Exists() || gjson.GetBytes(body, "reasoning").Exists()
+}
+
+// normalizeDeepSeekReasoningContent replays real prior reasoning_content for assistant
+// messages that contain tool_calls when the client omitted it in a later request.
+func normalizeDeepSeekReasoningContent(body []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
+	}
+
+	msgs := messages.Array()
+	out := body
+	patchedReasoning := 0
+	latestReasoning := ""
+	hasLatestReasoning := false
+
+	for msgIdx := range msgs {
+		msg := msgs[msgIdx]
+		role := strings.TrimSpace(msg.Get("role").String())
+		if role != "assistant" {
+			continue
+		}
+
+		reasoning := msg.Get("reasoning_content")
+		if reasoning.Exists() {
+			reasoningText := reasoning.String()
+			if strings.TrimSpace(reasoningText) != "" {
+				latestReasoning = reasoningText
+				hasLatestReasoning = true
+			}
+		}
+
+		toolCalls := msg.Get("tool_calls")
+		if !toolCalls.Exists() || !toolCalls.IsArray() || len(toolCalls.Array()) == 0 {
+			continue
+		}
+
+		if (!reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "") && hasLatestReasoning {
+			path := fmt.Sprintf("messages.%d.reasoning_content", msgIdx)
+			next, err := sjson.SetBytes(out, path, latestReasoning)
+			if err != nil {
+				return body, fmt.Errorf("openai compat executor: failed to set assistant reasoning_content: %w", err)
+			}
+			out = next
+			patchedReasoning++
+		}
+	}
+
+	if patchedReasoning > 0 {
+		log.WithField("patched_reasoning_messages", patchedReasoning).Debug("openai compat executor: normalized reasoning_content for tool call messages")
+	}
+
+	return out, nil
+}
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }

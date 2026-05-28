@@ -185,6 +185,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
 
+	replayDeepSeekThinking := shouldReplayClaudeThinkingForDeepSeek(baseModel, baseURL, body)
+	thinkingReplayScope := claudeThinkingReplayScope(auth, opts, baseModel, baseURL)
+	if replayDeepSeekThinking {
+		body, err = replayClaudeThinkingForToolUse(body, thinkingReplayScope)
+		if err != nil {
+			return resp, err
+		}
+	}
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -277,6 +286,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if replayDeepSeekThinking {
+		rememberClaudeThinkingForToolUseFromResponse(data, thinkingReplayScope)
+	}
 	if stream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
@@ -360,6 +372,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
 
+	replayDeepSeekThinking := shouldReplayClaudeThinkingForDeepSeek(baseModel, baseURL, body)
+	thinkingReplayScope := claudeThinkingReplayScope(auth, opts, baseModel, baseURL)
+	if replayDeepSeekThinking {
+		body, err = replayClaudeThinkingForToolUse(body, thinkingReplayScope)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -440,6 +461,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		return nil, err
 	}
+	var thinkingReplayRecorder *claudeThinkingStreamReplayRecorder
+	if replayDeepSeekThinking {
+		thinkingReplayRecorder = newClaudeThinkingStreamReplayRecorder(thinkingReplayScope)
+	}
+
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -456,6 +482,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				if thinkingReplayRecorder != nil {
+					thinkingReplayRecorder.consumeLine(line)
+				}
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}
@@ -488,6 +517,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if thinkingReplayRecorder != nil {
+				thinkingReplayRecorder.consumeLine(line)
+			}
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
