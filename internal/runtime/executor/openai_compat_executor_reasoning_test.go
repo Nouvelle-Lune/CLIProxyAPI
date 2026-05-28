@@ -55,13 +55,9 @@ func TestNormalizeDeepSeekReasoningContent_WithToolCallsNoReasoning(t *testing.T
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should add reasoning_content for assistant message with tool_calls
 	reasoning := gjson.GetBytes(result, "messages.1.reasoning_content")
-	if !reasoning.Exists() {
-		t.Fatalf("expected reasoning_content to be added")
-	}
-	if reasoning.String() != "[reasoning unavailable]" {
-		t.Fatalf("expected '[reasoning unavailable]', got %s", reasoning.String())
+	if reasoning.Exists() {
+		t.Fatalf("expected no fabricated reasoning_content, got %s", reasoning.String())
 	}
 }
 
@@ -120,13 +116,9 @@ func TestNormalizeDeepSeekReasoningContent_EmptyReasoningInToolCalls(t *testing.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should add reasoning_content when existing one is empty
 	reasoning := gjson.GetBytes(result, "messages.1.reasoning_content")
-	if !reasoning.Exists() {
-		t.Fatalf("expected reasoning_content to be added")
-	}
-	if reasoning.String() != "[reasoning unavailable]" {
-		t.Fatalf("expected '[reasoning unavailable]', got %s", reasoning.String())
+	if reasoning.String() != "" {
+		t.Fatalf("expected empty reasoning_content to stay empty, got %s", reasoning.String())
 	}
 }
 
@@ -141,13 +133,9 @@ func TestNormalizeDeepSeekReasoningContent_WhitespaceReasoningInToolCalls(t *tes
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should add reasoning_content when existing one is whitespace-only
 	reasoning := gjson.GetBytes(result, "messages.1.reasoning_content")
-	if !reasoning.Exists() {
-		t.Fatalf("expected reasoning_content to be added")
-	}
-	if reasoning.String() != "[reasoning unavailable]" {
-		t.Fatalf("expected '[reasoning unavailable]', got %s", reasoning.String())
+	if reasoning.String() != "   " {
+		t.Fatalf("expected whitespace reasoning_content to stay unchanged, got %q", reasoning.String())
 	}
 }
 
@@ -189,5 +177,21 @@ func TestNormalizeDeepSeekReasoningContent_NoToolCallsInAssistant(t *testing.T) 
 	reasoning := gjson.GetBytes(result, "messages.1.reasoning_content")
 	if reasoning.Exists() {
 		t.Fatalf("expected no reasoning_content, got %s", reasoning.String())
+	}
+}
+
+func TestShouldReplayOpenAIReasoningForDeepSeek_ScopesProviderAndReasoningMode(t *testing.T) {
+	body := []byte(`{"reasoning_effort":"high"}`)
+	if !shouldReplayOpenAIReasoningForDeepSeek("deepseek/deepseek-v4-pro", "http://127.0.0.1:8317", body) {
+		t.Fatalf("expected DeepSeek model with reasoning_effort to enable replay")
+	}
+	if !shouldReplayOpenAIReasoningForDeepSeek("claude-opus-4-7", "https://api.deepseek.com", body) {
+		t.Fatalf("expected DeepSeek endpoint with reasoning_effort to enable replay")
+	}
+	if shouldReplayOpenAIReasoningForDeepSeek("gpt-4o", "https://api.openai.com", body) {
+		t.Fatalf("expected non-DeepSeek provider to skip replay")
+	}
+	if shouldReplayOpenAIReasoningForDeepSeek("deepseek/deepseek-v4-pro", "http://127.0.0.1:8317", []byte(`{}`)) {
+		t.Fatalf("expected request without reasoning controls to skip replay")
 	}
 }
