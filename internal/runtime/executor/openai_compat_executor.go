@@ -22,6 +22,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -114,6 +115,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return resp, err
+	}
+
+	// Ensure reasoning_content is preserved for DeepSeek tool call turns.
+	// DeepSeek API requires reasoning_content to be passed back when thinking
+	// mode is enabled and tool calls are present.
+	translated, err = normalizeDeepSeekReasoningContent(translated)
 	if err != nil {
 		return resp, err
 	}
@@ -309,6 +318,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure reasoning_content is preserved for DeepSeek tool call turns.
+	// DeepSeek API requires reasoning_content to be passed back when thinking
+	// mode is enabled and tool calls are present.
+	translated, err = normalizeDeepSeekReasoningContent(translated)
 	if err != nil {
 		return nil, err
 	}
@@ -782,4 +799,72 @@ func (e statusErr) Error() string {
 	return fmt.Sprintf("status %d", e.code)
 }
 func (e statusErr) StatusCode() int            { return e.code }
+
+// normalizeDeepSeekReasoningContent ensures reasoning_content is preserved in assistant
+// messages that contain tool_calls. DeepSeek API requires reasoning_content to be passed
+// back in all subsequent requests when thinking mode is enabled and tool calls are present.
+// Without this, the API returns 400: "The reasoning_content in the thinking mode must be
+// passed back to the API."
+//
+// This function mirrors the logic in normalizeKimiToolMessageLinks for Kimi executor.
+func normalizeDeepSeekReasoningContent(body []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
+	}
+
+	msgs := messages.Array()
+	out := body
+	patchedReasoning := 0
+	latestReasoning := ""
+	hasLatestReasoning := false
+
+	for msgIdx := range msgs {
+		msg := msgs[msgIdx]
+		role := strings.TrimSpace(msg.Get("role").String())
+		if role != "assistant" {
+			continue
+		}
+
+		reasoning := msg.Get("reasoning_content")
+		if reasoning.Exists() {
+			reasoningText := reasoning.String()
+			if strings.TrimSpace(reasoningText) != "" {
+				latestReasoning = reasoningText
+				hasLatestReasoning = true
+			}
+		}
+
+		toolCalls := msg.Get("tool_calls")
+		if !toolCalls.Exists() || !toolCalls.IsArray() || len(toolCalls.Array()) == 0 {
+			continue
+		}
+
+		// Assistant message has tool_calls but missing reasoning_content.
+		// DeepSeek requires reasoning_content for tool call turns.
+		if !reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "" {
+			reasoningText := "[reasoning unavailable]"
+			if hasLatestReasoning && strings.TrimSpace(latestReasoning) != "" {
+				reasoningText = latestReasoning
+			}
+			path := fmt.Sprintf("messages.%d.reasoning_content", msgIdx)
+			next, err := sjson.SetBytes(out, path, reasoningText)
+			if err != nil {
+				return body, fmt.Errorf("openai compat executor: failed to set assistant reasoning_content: %w", err)
+			}
+			out = next
+			patchedReasoning++
+		}
+	}
+
+	if patchedReasoning > 0 {
+		log.WithField("patched_reasoning_messages", patchedReasoning).Debug("openai compat executor: normalized reasoning_content for tool call messages")
+	}
+
+	return out, nil
+}
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }

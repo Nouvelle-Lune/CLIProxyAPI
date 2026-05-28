@@ -158,6 +158,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
+	// Ensure thinking content blocks are preserved for assistant messages with tool_use.
+	// DeepSeek's Anthropic endpoint requires content[].thinking to be passed back when
+	// thinking mode is enabled and tool calls are present. Claude Code strips thinking
+	// blocks from assistant messages, causing 400 errors on subsequent requests.
+	body = normalizeClaudeThinkingForToolUse(body)
+
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
@@ -335,6 +341,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+
+	// Ensure thinking content blocks are preserved for assistant messages with tool_use.
+	// DeepSeek's Anthropic endpoint requires content[].thinking to be passed back when
+	// thinking mode is enabled and tool calls are present.
+	body = normalizeClaudeThinkingForToolUse(body)
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -2379,6 +2390,92 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 			body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
 			return body
 		}
+	}
+
+	return body
+}
+
+// normalizeClaudeThinkingForToolUse ensures thinking content blocks are preserved in
+// assistant messages that contain tool_use. DeepSeek's Anthropic endpoint requires
+// content[].thinking to be passed back when thinking mode is enabled and tool calls
+// are present. Claude Code strips thinking blocks from assistant messages in subsequent
+// requests, causing 400 errors from DeepSeek.
+//
+// This function mirrors the logic in normalizeDeepSeekReasoningContent for OpenAI format.
+func normalizeClaudeThinkingForToolUse(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	msgs := messages.Array()
+	patchedThinking := 0
+	latestThinking := ""
+	hasLatestThinking := false
+
+	for msgIdx := range msgs {
+		msg := msgs[msgIdx]
+		role := strings.TrimSpace(msg.Get("role").String())
+		if role != "assistant" {
+			continue
+		}
+
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			continue
+		}
+
+		hasThinking := false
+		hasToolUse := false
+		thinkingText := ""
+
+		content.ForEach(func(_, part gjson.Result) bool {
+			partType := part.Get("type").String()
+			switch partType {
+			case "thinking":
+				thinkingText = part.Get("thinking").String()
+				if strings.TrimSpace(thinkingText) != "" {
+					hasThinking = true
+					latestThinking = thinkingText
+					hasLatestThinking = true
+				}
+			case "tool_use":
+				hasToolUse = true
+			}
+			return true
+		})
+
+		// If assistant message has tool_use but no thinking, add a thinking block.
+		// DeepSeek requires thinking for tool call turns.
+		if hasToolUse && !hasThinking {
+			fallbackThinking := "[reasoning unavailable]"
+			if hasLatestThinking && strings.TrimSpace(latestThinking) != "" {
+				fallbackThinking = latestThinking
+			}
+
+			// Prepend thinking block to content array
+			thinkingBlock := []byte(`{"type":"thinking","thinking":"","signature":""}`)
+			thinkingBlock, _ = sjson.SetBytes(thinkingBlock, "thinking", fallbackThinking)
+
+			// Rebuild the content array with thinking block prepended
+			newContent := []byte(`[]`)
+			newContent, _ = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			content.ForEach(func(_, part gjson.Result) bool {
+				newContent, _ = sjson.SetRawBytes(newContent, "-1", []byte(part.Raw))
+				return true
+			})
+
+			body, _ = sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", msgIdx), newContent)
+			patchedThinking++
+		}
+	}
+
+	if patchedThinking > 0 {
+		log.WithField("patched_thinking_messages", patchedThinking).Debug("claude executor: normalized thinking content for tool_use messages")
 	}
 
 	return body
