@@ -206,14 +206,6 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				hasToolCalls := len(toolCalls) > 0
 				hasToolResults := len(toolResults) > 0
 
-				// DeepSeek API requires reasoning_content for assistant messages with tool_calls
-				// in thinking mode. If Claude Code stripped the thinking content block, we need
-				// to add a default reasoning_content to prevent 400 errors.
-				if hasToolCalls && !hasReasoning {
-					reasoningContent = "[reasoning unavailable]"
-					hasReasoning = true
-				}
-
 				// OpenAI requires: tool messages MUST immediately follow the assistant message with tool_calls.
 				// Therefore, we emit tool_result messages FIRST (they respond to the previous assistant's tool_calls),
 				// then emit the current message's content.

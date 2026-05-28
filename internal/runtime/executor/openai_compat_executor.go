@@ -119,12 +119,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 
-	// Ensure reasoning_content is preserved for DeepSeek tool call turns.
-	// DeepSeek API requires reasoning_content to be passed back when thinking
-	// mode is enabled and tool calls are present.
-	translated, err = normalizeDeepSeekReasoningContent(translated)
-	if err != nil {
-		return resp, err
+	if shouldReplayOpenAIReasoningForDeepSeek(baseModel, baseURL, translated) {
+		translated, err = normalizeDeepSeekReasoningContent(translated)
+		if err != nil {
+			return resp, err
+		}
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -322,12 +321,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
-	// Ensure reasoning_content is preserved for DeepSeek tool call turns.
-	// DeepSeek API requires reasoning_content to be passed back when thinking
-	// mode is enabled and tool calls are present.
-	translated, err = normalizeDeepSeekReasoningContent(translated)
-	if err != nil {
-		return nil, err
+	if shouldReplayOpenAIReasoningForDeepSeek(baseModel, baseURL, translated) {
+		translated, err = normalizeDeepSeekReasoningContent(translated)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -798,15 +796,18 @@ func (e statusErr) Error() string {
 	}
 	return fmt.Sprintf("status %d", e.code)
 }
-func (e statusErr) StatusCode() int            { return e.code }
+func (e statusErr) StatusCode() int { return e.code }
 
-// normalizeDeepSeekReasoningContent ensures reasoning_content is preserved in assistant
-// messages that contain tool_calls. DeepSeek API requires reasoning_content to be passed
-// back in all subsequent requests when thinking mode is enabled and tool calls are present.
-// Without this, the API returns 400: "The reasoning_content in the thinking mode must be
-// passed back to the API."
-//
-// This function mirrors the logic in normalizeKimiToolMessageLinks for Kimi executor.
+func shouldReplayOpenAIReasoningForDeepSeek(baseModel, baseURL string, body []byte) bool {
+	providerKey := strings.ToLower(strings.TrimSpace(baseModel + " " + baseURL))
+	if !strings.Contains(providerKey, "deepseek") {
+		return false
+	}
+	return gjson.GetBytes(body, "reasoning_effort").Exists() || gjson.GetBytes(body, "reasoning").Exists()
+}
+
+// normalizeDeepSeekReasoningContent replays real prior reasoning_content for assistant
+// messages that contain tool_calls when the client omitted it in a later request.
 func normalizeDeepSeekReasoningContent(body []byte) ([]byte, error) {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body, nil
@@ -844,15 +845,9 @@ func normalizeDeepSeekReasoningContent(body []byte) ([]byte, error) {
 			continue
 		}
 
-		// Assistant message has tool_calls but missing reasoning_content.
-		// DeepSeek requires reasoning_content for tool call turns.
-		if !reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "" {
-			reasoningText := "[reasoning unavailable]"
-			if hasLatestReasoning && strings.TrimSpace(latestReasoning) != "" {
-				reasoningText = latestReasoning
-			}
+		if (!reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "") && hasLatestReasoning {
 			path := fmt.Sprintf("messages.%d.reasoning_content", msgIdx)
-			next, err := sjson.SetBytes(out, path, reasoningText)
+			next, err := sjson.SetBytes(out, path, latestReasoning)
 			if err != nil {
 				return body, fmt.Errorf("openai compat executor: failed to set assistant reasoning_content: %w", err)
 			}
