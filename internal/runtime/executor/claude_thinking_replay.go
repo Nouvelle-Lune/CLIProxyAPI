@@ -15,12 +15,14 @@ import (
 const maxClaudeThinkingReplayEntries = 2048
 
 type claudeThinkingReplayStore struct {
-	mu    sync.Mutex
-	items map[string]string
-	order []string
+	mu            sync.Mutex
+	items         map[string]string
+	latestByScope map[string]string
+	latest        string
+	order         []string
 }
 
-var deepSeekClaudeThinkingReplay = &claudeThinkingReplayStore{items: make(map[string]string)}
+var deepSeekClaudeThinkingReplay = &claudeThinkingReplayStore{items: make(map[string]string), latestByScope: make(map[string]string)}
 
 func shouldReplayClaudeThinkingForDeepSeek(baseModel, baseURL string, body []byte) bool {
 	providerKey := strings.ToLower(strings.TrimSpace(baseModel + " " + baseURL))
@@ -85,7 +87,7 @@ func replayClaudeThinkingForToolUse(body []byte, scope string) ([]byte, error) {
 
 		thinkingBlock, ok := deepSeekClaudeThinkingReplay.get(scope, firstToolUseID)
 		if !ok {
-			continue
+			return body, fmt.Errorf("claude executor: no thinking content available for tool_use %q", firstToolUseID)
 		}
 
 		var err error
@@ -148,6 +150,7 @@ func rememberClaudeThinkingForToolUseFromMessage(root gjson.Result, scope string
 		case "thinking":
 			if strings.TrimSpace(part.Get("thinking").String()) != "" {
 				latestThinking = part.Raw
+				deepSeekClaudeThinkingReplay.put(scope, "", latestThinking)
 			}
 		case "tool_use":
 			toolUseID := strings.TrimSpace(part.Get("id").String())
@@ -250,23 +253,43 @@ func (r *claudeThinkingStreamReplayRecorder) consumeContentBlockStop(root gjson.
 		return
 	}
 	r.latestThinking = string(thinkingJSON)
+	deepSeekClaudeThinkingReplay.put(r.scope, "", r.latestThinking)
 }
 
 func (s *claudeThinkingReplayStore) get(scope, toolUseID string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	value, ok := s.items[scope+"\x00"+toolUseID]
-	return value, ok
+	if value, ok := s.items[scope+"\x00"+toolUseID]; ok {
+		return value, true
+	}
+	if value := s.latestByScope[scope]; strings.TrimSpace(value) != "" {
+		return value, true
+	}
+	if strings.TrimSpace(s.latest) != "" {
+		return s.latest, true
+	}
+	return "", false
 }
 
 func (s *claudeThinkingReplayStore) put(scope, toolUseID, thinkingBlock string) {
-	if strings.TrimSpace(scope) == "" || strings.TrimSpace(toolUseID) == "" || strings.TrimSpace(thinkingBlock) == "" {
+	if strings.TrimSpace(scope) == "" || strings.TrimSpace(thinkingBlock) == "" {
 		return
 	}
 
-	key := scope + "\x00" + toolUseID
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.latestByScope == nil {
+		s.latestByScope = make(map[string]string)
+	}
+	s.latestByScope[scope] = thinkingBlock
+	s.latest = thinkingBlock
+	if strings.TrimSpace(toolUseID) == "" {
+		return
+	}
+	if s.items == nil {
+		s.items = make(map[string]string)
+	}
+	key := scope + "\x00" + toolUseID
 	if _, exists := s.items[key]; !exists {
 		s.order = append(s.order, key)
 	}
