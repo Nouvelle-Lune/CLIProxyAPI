@@ -1490,26 +1490,21 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
-				if ra := retryAfterFromError(errExec); ra != nil {
-					result.RetryAfter = ra
-				}
-				m.MarkResult(execCtx, result)
-				if isRequestInvalidError(errExec) {
-					return cliproxyexecutor.Response{}, errExec
-				}
+				// CountTokens is an optional estimation call that should never
+				// affect auth or model state. Log the failure and continue so the
+				// calling handler can decide how to respond (e.g. return a mock
+				// count for unsupported upstreams).
+				log.WithFields(log.Fields{
+					"auth":  auth.ID,
+					"model": resultModel,
+				}).Debugf("count_tokens failed: %v", errExec)
 				authErr = errExec
 				continue
 			}
-			m.MarkResult(execCtx, result)
 			return resp, nil
 		}
 		if authErr != nil {
