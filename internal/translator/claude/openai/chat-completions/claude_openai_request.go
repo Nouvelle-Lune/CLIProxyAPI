@@ -204,6 +204,43 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					})
 				}
 
+				// Convert assistant reasoning_content to Claude thinking block for
+				// cross-provider history: OpenAI-compatible providers return
+				// reasoning_content in assistant messages, which must become a
+				// thinking content part when switching to a Claude provider. Claude
+				// Code requires thinking and tool_use blocks in the same assistant
+				// turn to be present for the conversation to be considered valid.
+				if role == "assistant" {
+					reasoningText := ""
+					rc := message.Get("reasoning_content")
+					if rc.Exists() && rc.Type == gjson.String {
+						reasoningText = strings.TrimSpace(rc.String())
+					}
+					if reasoningText == "" {
+						// Also accept the "reasoning" key some non-stream
+						// translators use for Claude->OpenAI conversion.
+						if r := message.Get("reasoning"); r.Exists() && r.Type == gjson.String {
+							reasoningText = strings.TrimSpace(r.String())
+						}
+					}
+					if reasoningText != "" {
+						thinkingPart := []byte(`{"type":"thinking","thinking":""}`)
+						thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", reasoningText)
+						// Prepend thinking BEFORE text and tool_use so the
+						// ordering matches what Claude expects.
+						newContent := []byte(`[]`)
+						newContent, _ = sjson.SetRawBytes(newContent, "-1", thinkingPart)
+						// Append existing content parts
+						existingContent := gjson.GetBytes(msg, "content")
+						if existingContent.IsArray() {
+							for _, part := range existingContent.Array() {
+								newContent, _ = sjson.SetRawBytes(newContent, "-1", []byte(part.Raw))
+							}
+						}
+						msg, _ = sjson.SetRawBytes(msg, "content", newContent)
+					}
+				}
+
 				// Handle tool calls (for assistant messages)
 				if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && role == "assistant" {
 					toolCalls.ForEach(func(_, toolCall gjson.Result) bool {

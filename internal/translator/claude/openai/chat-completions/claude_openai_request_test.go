@@ -243,3 +243,86 @@ func TestConvertOpenAIRequestToClaude_SystemOnlyInputKeepsFallbackUserMessage(t 
 		t.Fatalf("Expected fallback text %q, got %q", "", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_AssistantReasoningContentBecomesThinkingBeforeTextAndToolUse(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": "I will inspect the file.",
+				"reasoning_content": "Need to read before editing.",
+				"tool_calls": [
+					{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"/tmp/a.go\"}"}}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	content := gjson.GetBytes(result, "messages.0.content")
+
+	if got := content.Get("0.type").String(); got != "thinking" {
+		t.Fatalf("Expected first content type %q, got %q. Content: %s", "thinking", got, content.Raw)
+	}
+	if got := content.Get("0.thinking").String(); got != "Need to read before editing." {
+		t.Fatalf("Expected thinking text %q, got %q", "Need to read before editing.", got)
+	}
+	if got := content.Get("1.type").String(); got != "text" {
+		t.Fatalf("Expected second content type %q, got %q. Content: %s", "text", got, content.Raw)
+	}
+	if got := content.Get("1.text").String(); got != "I will inspect the file." {
+		t.Fatalf("Expected text content %q, got %q", "I will inspect the file.", got)
+	}
+	if got := content.Get("2.type").String(); got != "tool_use" {
+		t.Fatalf("Expected third content type %q, got %q. Content: %s", "tool_use", got, content.Raw)
+	}
+	if got := content.Get("2.id").String(); got != "call_1" {
+		t.Fatalf("Expected tool_use id %q, got %q", "call_1", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_AssistantReasoningFallbackKeyBecomesThinking(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role":"assistant","content":[{"type":"text","text":"done"}],"reasoning":"legacy reasoning"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	content := gjson.GetBytes(result, "messages.0.content")
+
+	if got := content.Get("0.type").String(); got != "thinking" {
+		t.Fatalf("Expected first content type %q, got %q. Content: %s", "thinking", got, content.Raw)
+	}
+	if got := content.Get("0.thinking").String(); got != "legacy reasoning" {
+		t.Fatalf("Expected thinking text %q, got %q", "legacy reasoning", got)
+	}
+	if got := content.Get("1.text").String(); got != "done" {
+		t.Fatalf("Expected existing text to be preserved, got %q", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_IgnoresUserAndBlankAssistantReasoning(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role":"user","content":"hi","reasoning_content":"should not become thinking"},
+			{"role":"assistant","content":"hello","reasoning_content":"   "}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("messages.0.content.0.type").String(); got != "text" {
+		t.Fatalf("Expected user content type %q, got %q", "text", got)
+	}
+	if got := resultJSON.Get("messages.1.content.0.type").String(); got != "text" {
+		t.Fatalf("Expected blank assistant reasoning to be skipped, got first type %q", got)
+	}
+	if resultJSON.Get("messages.1.content.1").Exists() {
+		t.Fatalf("Expected no extra assistant content for blank reasoning: %s", resultJSON.Get("messages.1.content").Raw)
+	}
+}

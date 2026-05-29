@@ -171,9 +171,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	var param any
-	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
-	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	if from == sdktranslator.FromString("claude") {
+		out = fixClaudeResponseModel(out, requestedModel)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -290,6 +291,9 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range chunks {
+				if from == sdktranslator.FromString("claude") {
+					chunks[i] = fixClaudeResponseModel(chunks[i], requestedModel)
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
@@ -299,6 +303,9 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range doneChunks {
+			if from == sdktranslator.FromString("claude") {
+				doneChunks[i] = fixClaudeResponseModel(doneChunks[i], requestedModel)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
 			case <-ctx.Done():
