@@ -820,7 +820,6 @@ func normalizeDeepSeekReasoningContent(body []byte) ([]byte, error) {
 
 	msgs := messages.Array()
 	out := body
-	patchedReasoning := 0
 	latestReasoning := ""
 	hasLatestReasoning := false
 
@@ -852,12 +851,7 @@ func normalizeDeepSeekReasoningContent(body []byte) ([]byte, error) {
 				return body, fmt.Errorf("openai compat executor: failed to set assistant reasoning_content: %w", err)
 			}
 			out = next
-			patchedReasoning++
 		}
-	}
-
-	if patchedReasoning > 0 {
-		log.WithField("patched_reasoning_messages", patchedReasoning).Debug("openai compat executor: normalized reasoning_content for tool call messages")
 	}
 
 	return out, nil

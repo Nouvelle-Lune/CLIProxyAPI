@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,29 @@ func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
 		}
 	})
+}
+
+func TestCooldownPageServesStaticAsset(t *testing.T) {
+	staticDir := t.TempDir()
+	t.Setenv("MANAGEMENT_STATIC_PATH", staticDir)
+
+	cooldownHTML := []byte("<html><body>cooldown</body></html>")
+	if err := os.WriteFile(filepath.Join(staticDir, "cooldown.html"), cooldownHTML, 0o600); err != nil {
+		t.Fatalf("failed to write cooldown page: %v", err)
+	}
+
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/cooldown.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != string(cooldownHTML) {
+		t.Fatalf("body = %q, want %q", got, string(cooldownHTML))
+	}
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {

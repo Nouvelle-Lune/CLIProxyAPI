@@ -37,6 +37,9 @@ type VertexCompatKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// Cooldown overrides per-status-code cooldown durations for this key.
+	Cooldown *CooldownConfig `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string  { return k.APIKey }

@@ -2261,6 +2261,68 @@ func TestFixClaudeResponseModel_NonStream_ReplacesModel(t *testing.T) {
 	}
 }
 
+func TestFixClaudeResponseModel_NonStream_ReplacesGenericThirdPartyModel(t *testing.T) {
+	response := []byte(`{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"kept"},{"type":"tool_use","id":"toolu_01","name":"Read","input":{}}],"model":"claude-sonnet-4","stop_reason":"tool_use"}`)
+	requestModel := "openrouter/anthropic/claude-sonnet-4"
+
+	out := fixClaudeResponseModel(response, requestModel)
+
+	if got := gjson.GetBytes(out, "model").String(); got != requestModel {
+		t.Fatalf("model = %q, want %q", got, requestModel)
+	}
+	if got := gjson.GetBytes(out, "content.0.type").String(); got != "thinking" {
+		t.Fatalf("thinking block changed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "content.1.type").String(); got != "tool_use" {
+		t.Fatalf("tool_use block changed: %s", string(out))
+	}
+}
+
+func TestNormalizeClaudeMidConversationSystemMessages_MovesStringSystemMessage(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-pro","system":[{"type":"text","text":"top"}],"messages":[{"role":"user","content":"hi"},{"role":"system","content":"runtime tools"},{"role":"assistant","content":"ok"}]}`)
+
+	out, err := normalizeClaudeMidConversationSystemMessages(body)
+	if err != nil {
+		t.Fatalf("normalizeClaudeMidConversationSystemMessages returned error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count = %d, want 2; body: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, `messages.#(role="system")`).Exists() {
+		t.Fatalf("system role remained in messages: %s", string(out))
+	}
+	system := gjson.GetBytes(out, "system").Array()
+	if len(system) != 2 {
+		t.Fatalf("system count = %d, want 2; body: %s", len(system), string(out))
+	}
+	if got := system[0].Get("text").String(); got != "top" {
+		t.Fatalf("system[0].text = %q, want %q", got, "top")
+	}
+	if got := system[1].Get("text").String(); got != "runtime tools" {
+		t.Fatalf("system[1].text = %q, want %q", got, "runtime tools")
+	}
+}
+
+func TestNormalizeClaudeMidConversationSystemMessages_MovesArraySystemMessage(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-pro","messages":[{"role":"system","content":[{"type":"text","text":"dynamic","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, err := normalizeClaudeMidConversationSystemMessages(body)
+	if err != nil {
+		t.Fatalf("normalizeClaudeMidConversationSystemMessages returned error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user; body: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "dynamic" {
+		t.Fatalf("system.0.text = %q, want dynamic", got)
+	}
+	if !gjson.GetBytes(out, "system.0.cache_control").Exists() {
+		t.Fatalf("system.0.cache_control should be preserved: %s", string(out))
+	}
+}
+
 func TestFixClaudeResponseModel_NonStream_ModelAlreadyMatches(t *testing.T) {
 	response := []byte(`{"model":"claude-sonnet-4-20250514","type":"message"}`)
 
@@ -2310,6 +2372,21 @@ func TestFixClaudeResponseModel_SSE_MessageStart_ReplacesMessageModel(t *testing
 	}
 	if got := gjson.GetBytes(payload, "message.id").String(); got != "msg_01" {
 		t.Fatalf("message.id changed to %q", got)
+	}
+}
+
+func TestFixClaudeResponseModel_SSE_ReplacesGenericThirdPartyModel(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-opus-4","stop_reason":"tool_use","stop_sequence":null}}`)
+	requestModel := "gateway/vendor/claude-opus-4"
+
+	out := fixClaudeResponseModel(line, requestModel)
+
+	payload := out[len("data: "):]
+	if got := gjson.GetBytes(payload, "message.model").String(); got != requestModel {
+		t.Fatalf("message.model = %q, want %q, full payload: %s", got, requestModel, string(payload))
+	}
+	if got := gjson.GetBytes(payload, "message.stop_reason").String(); got != "tool_use" {
+		t.Fatalf("message.stop_reason changed to %q", got)
 	}
 }
 

@@ -345,8 +345,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	messages = gjson.GetBytes(out, "messages")
 	msgs = messages.Array()
 	pending := make([]string, 0)
-	patched := 0
-	patchedReasoning := 0
 	ambiguous := 0
 	latestReasoning := ""
 	hasLatestReasoning := false
@@ -388,7 +386,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 					return body, fmt.Errorf("kimi executor: failed to set assistant reasoning_content: %w", err)
 				}
 				out = next
-				patchedReasoning++
 			}
 
 			for _, tc := range toolCalls.Array() {
@@ -409,7 +406,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 						return body, fmt.Errorf("kimi executor: failed to set tool_call_id from call_id: %w", err)
 					}
 					out = next
-					patched++
 				}
 			}
 			if toolCallID == "" {
@@ -421,7 +417,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 						return body, fmt.Errorf("kimi executor: failed to infer tool_call_id: %w", err)
 					}
 					out = next
-					patched++
 				} else if len(pending) > 1 {
 					ambiguous++
 				}
@@ -432,12 +427,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		}
 	}
 
-	if patched > 0 || patchedReasoning > 0 {
-		log.WithFields(log.Fields{
-			"patched_tool_messages":      patched,
-			"patched_reasoning_messages": patchedReasoning,
-		}).Debug("kimi executor: normalized tool message fields")
-	}
 	if ambiguous > 0 {
 		log.WithFields(log.Fields{
 			"ambiguous_tool_messages": ambiguous,

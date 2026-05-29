@@ -114,6 +114,17 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 
 	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	if errMsg != nil {
+		// When the upstream does not support the count_tokens endpoint (returns 404),
+		// return a mock zero-count response instead of propagating the error.
+		// Propagating a 404 triggers auth suspension in the conductor's MarkResult,
+		// which disables the auth for 12 hours — killing all subsequent messages
+		// requests even though the auth is perfectly valid for inference.
+		if errMsg.StatusCode == http.StatusNotFound {
+			log.WithContext(cliCtx).Warnf("count_tokens not supported upstream for model %s, returning mock response", modelName)
+			c.JSON(http.StatusOK, gin.H{"input_tokens": 0})
+			cliCancel("count_tokens not supported, returned mock")
+			return
+		}
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
 		return

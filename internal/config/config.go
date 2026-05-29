@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
@@ -381,6 +382,108 @@ type CloakConfig struct {
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
 
+// CooldownConfig holds per-status-code cooldown durations that override the built-in defaults.
+// Each field is a time.Duration; zero means "use the default".
+// JSON accepts both string durations ("5s", "1m") and nanosecond integers.
+type CooldownConfig struct {
+	// Transient applies to 408, 500, 502, 503, 504. Default: 1m.
+	Transient time.Duration `yaml:"transient,omitempty" json:"transient,omitempty"`
+	// Unauthorized applies to 401. Default: 30m.
+	Unauthorized time.Duration `yaml:"unauthorized,omitempty" json:"unauthorized,omitempty"`
+	// PaymentRequired applies to 402, 403. Default: 30m.
+	PaymentRequired time.Duration `yaml:"payment-required,omitempty" json:"payment-required,omitempty"`
+	// NotFound applies to 404. Default: 12h.
+	NotFound time.Duration `yaml:"not-found,omitempty" json:"not-found,omitempty"`
+	// QuotaBase is the base duration for 429 exponential backoff. Default: 1s.
+	QuotaBase time.Duration `yaml:"quota-base,omitempty" json:"quota-base,omitempty"`
+	// QuotaMax caps the 429 exponential backoff. Default: 30m.
+	QuotaMax time.Duration `yaml:"quota-max,omitempty" json:"quota-max,omitempty"`
+}
+
+func (c *CooldownConfig) UnmarshalJSON(data []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = CooldownConfig{}
+	for k, v := range raw {
+		d := parseJSONDuration(v)
+		switch k {
+		case "transient":
+			c.Transient = d
+		case "unauthorized":
+			c.Unauthorized = d
+		case "payment-required":
+			c.PaymentRequired = d
+		case "not-found":
+			c.NotFound = d
+		case "quota-base":
+			c.QuotaBase = d
+		case "quota-max":
+			c.QuotaMax = d
+		}
+	}
+	return nil
+}
+
+func parseJSONDuration(v any) time.Duration {
+	switch val := v.(type) {
+	case float64:
+		return time.Duration(val)
+	case string:
+		d, err := time.ParseDuration(strings.TrimSpace(val))
+		if err != nil {
+			return 0
+		}
+		return d
+	default:
+		return 0
+	}
+}
+
+// ResolveCooldown returns the effective cooldown duration for the given HTTP status code,
+// falling back to the built-in default when the override is zero.
+func (c *CooldownConfig) ResolveCooldown(statusCode int) time.Duration {
+	if c == nil {
+		return DefaultCooldown(statusCode)
+	}
+	switch statusCode {
+	case 401:
+		if c.Unauthorized > 0 {
+			return c.Unauthorized
+		}
+	case 402, 403:
+		if c.PaymentRequired > 0 {
+			return c.PaymentRequired
+		}
+	case 404:
+		if c.NotFound > 0 {
+			return c.NotFound
+		}
+	case 408, 500, 502, 503, 504:
+		if c.Transient > 0 {
+			return c.Transient
+		}
+	}
+	return DefaultCooldown(statusCode)
+}
+
+// DefaultCooldown returns the built-in cooldown duration for the given HTTP status code.
+func DefaultCooldown(statusCode int) time.Duration {
+	switch statusCode {
+	case 401:
+		return 30 * time.Minute
+	case 402, 403:
+		return 30 * time.Minute
+	case 404:
+		return 12 * time.Hour
+	case 408, 500, 502, 503, 504:
+		return 1 * time.Minute
+	default:
+		return 0
+	}
+}
+
 // ClaudeKey represents the configuration for a Claude API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type ClaudeKey struct {
@@ -420,6 +523,10 @@ type ClaudeKey struct {
 	// Claude /v1/messages requests. It is disabled by default so upstream seed
 	// changes do not alter the proxy's legacy behavior.
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
+
+	// Cooldown overrides per-status-code cooldown durations for this key.
+	// Unset fields fall back to the built-in defaults.
+	Cooldown *CooldownConfig `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
@@ -471,6 +578,9 @@ type CodexKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// Cooldown overrides per-status-code cooldown durations for this key.
+	Cooldown *CooldownConfig `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
@@ -518,6 +628,9 @@ type GeminiKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// Cooldown overrides per-status-code cooldown durations for this key.
+	Cooldown *CooldownConfig `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
 }
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }

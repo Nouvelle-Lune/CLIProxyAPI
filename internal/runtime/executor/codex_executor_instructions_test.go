@@ -53,6 +53,47 @@ func TestCodexExecutorExecuteNormalizesNullInstructions(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorExecuteNormalizesSystemInputMessages(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.5",
+		Payload: []byte(`{
+			"model":"gpt-5.5",
+			"messages":[
+				{"role":"user","content":[{"type":"text","text":"hi"}]},
+				{"role":"system","content":"deferred tools are now available"}
+			],
+			"stream":true
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gjson.GetBytes(gotBody, `input.#(role="system")`).Exists() {
+		t.Fatalf("system input message remained: %s", string(gotBody))
+	}
+	if !gjson.GetBytes(gotBody, `input.#(role="developer")`).Exists() {
+		t.Fatalf("developer input message missing: %s", string(gotBody))
+	}
+}
+
 func TestCodexExecutorExecuteStreamNormalizesNullInstructions(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
