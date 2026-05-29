@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,6 +158,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	body, err = normalizeClaudeMidConversationSystemMessages(body)
+	if err != nil {
+		return resp, err
+	}
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -184,15 +189,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
-
-	replayDeepSeekThinking := shouldReplayClaudeThinkingForDeepSeek(baseModel, baseURL, body)
-	thinkingReplayScope := claudeThinkingReplayScope(auth, opts, baseModel, baseURL)
-	if replayDeepSeekThinking {
-		body, err = replayClaudeThinkingForToolUse(body, thinkingReplayScope)
-		if err != nil {
-			return resp, err
-		}
-	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -286,9 +282,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-	if replayDeepSeekThinking {
-		rememberClaudeThinkingForToolUseFromResponse(data, thinkingReplayScope)
-	}
 	if stream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
@@ -315,7 +308,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		data,
 		&param,
 	)
-	out = fixClaudeResponseModel(out, req.Model)
+	out = fixClaudeResponseModel(out, requestedModel)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -348,6 +341,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+	body, err = normalizeClaudeMidConversationSystemMessages(body)
+	if err != nil {
+		return nil, err
+	}
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -372,15 +369,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
-
-	replayDeepSeekThinking := shouldReplayClaudeThinkingForDeepSeek(baseModel, baseURL, body)
-	thinkingReplayScope := claudeThinkingReplayScope(auth, opts, baseModel, baseURL)
-	if replayDeepSeekThinking {
-		body, err = replayClaudeThinkingForToolUse(body, thinkingReplayScope)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -462,11 +450,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		return nil, err
 	}
-	var thinkingReplayRecorder *claudeThinkingStreamReplayRecorder
-	if replayDeepSeekThinking {
-		thinkingReplayRecorder = newClaudeThinkingStreamReplayRecorder(thinkingReplayScope)
-	}
-
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -483,13 +466,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				if thinkingReplayRecorder != nil {
-					thinkingReplayRecorder.consumeLine(line)
-				}
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}
-				line = fixClaudeResponseModel(line, req.Model)
+				line = fixClaudeResponseModel(line, requestedModel)
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
@@ -519,9 +499,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if thinkingReplayRecorder != nil {
-				thinkingReplayRecorder.consumeLine(line)
-			}
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -556,10 +533,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
-// fixClaudeResponseModel ensures the response model name matches the request model name.
-// When DeepSeek returns "deepseek-v4-pro" but the client requested "deepseek/deepseek-v4-pro",
-// Claude Code interprets the model mismatch as invalid and discards thinking blocks from
-// conversation history. Matching the model names prevents this and keeps thinking intact.
+// fixClaudeResponseModel ensures the response model name matches the client-visible
+// request model name. Claude Code treats a response from a different model as invalid
+// conversation history and may drop thinking or tool-use blocks on the next turn.
 func fixClaudeResponseModel(data []byte, requestModel string) []byte {
 	// The [1m] suffix is Anthropic-specific context window notation. When the upstream
 	// response does not include [1m], the target model should not include it either.
@@ -691,6 +667,97 @@ func validateClaudeStreamingResponse(data []byte) error {
 	return nil
 }
 
+func normalizeClaudeMidConversationSystemMessages(body []byte) ([]byte, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("normalize claude mid-conversation system messages: decode payload: %w", err)
+	}
+
+	messagesRaw, ok := payload["messages"]
+	if !ok {
+		return body, nil
+	}
+	messages, ok := messagesRaw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages must be an array")
+	}
+
+	filteredMessages := make([]any, 0, len(messages))
+	systemBlocks, err := collectClaudeTopLevelSystemBlocks(payload["system"])
+	if err != nil {
+		return nil, err
+	}
+	movedSystem := false
+	for i, messageRaw := range messages {
+		message, ok := messageRaw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages[%d] must be an object", i)
+		}
+		role, ok := message["role"].(string)
+		if !ok {
+			return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages[%d].role must be a string", i)
+		}
+		if role != "system" {
+			filteredMessages = append(filteredMessages, messageRaw)
+			continue
+		}
+		blocks, err := claudeSystemContentToBlocks(message["content"], i)
+		if err != nil {
+			return nil, err
+		}
+		systemBlocks = append(systemBlocks, blocks...)
+		movedSystem = true
+	}
+	if !movedSystem {
+		return body, nil
+	}
+
+	payload["messages"] = filteredMessages
+	if len(systemBlocks) > 0 {
+		payload["system"] = systemBlocks
+	} else {
+		delete(payload, "system")
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("normalize claude mid-conversation system messages: encode payload: %w", err)
+	}
+	return out, nil
+}
+
+func collectClaudeTopLevelSystemBlocks(system any) ([]any, error) {
+	if system == nil {
+		return nil, nil
+	}
+	switch value := system.(type) {
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil, nil
+		}
+		return []any{map[string]any{"type": "text", "text": value}}, nil
+	case []any:
+		return append([]any(nil), value...), nil
+	default:
+		return nil, fmt.Errorf("normalize claude mid-conversation system messages: system must be a string or array")
+	}
+}
+
+func claudeSystemContentToBlocks(content any, messageIndex int) ([]any, error) {
+	switch value := content.(type) {
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil, nil
+		}
+		return []any{map[string]any{"type": "text", "text": value}}, nil
+	case []any:
+		return append([]any(nil), value...), nil
+	case nil:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages[%d].content must be a string or array", messageIndex)
+	}
+}
+
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -705,6 +772,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, err := normalizeClaudeMidConversationSystemMessages(body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)

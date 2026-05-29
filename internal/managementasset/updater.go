@@ -28,6 +28,7 @@ const (
 	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
 	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
 	managementAssetName          = "management.html"
+	cooldownAssetName            = "cooldown.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
@@ -37,13 +38,16 @@ const (
 // ManagementFileName exposes the control panel asset filename.
 const ManagementFileName = managementAssetName
 
+// CooldownFileName exposes the cooldown page asset filename.
+const CooldownFileName = cooldownAssetName
+
 var (
-	lastUpdateCheckMu   sync.Mutex
-	lastUpdateCheckTime time.Time
-	currentConfigPtr    atomic.Pointer[config.Config]
-	schedulerOnce       sync.Once
-	schedulerConfigPath atomic.Value
-	sfGroup             singleflight.Group
+	lastUpdateCheckMu     sync.Mutex
+	lastUpdateCheckByPath = map[string]time.Time{}
+	currentConfigPtr      atomic.Pointer[config.Config]
+	schedulerOnce         sync.Once
+	schedulerConfigPath   atomic.Value
+	sfGroup               singleflight.Group
 )
 
 // SetCurrentConfig stores the latest configuration snapshot for management asset decisions.
@@ -162,49 +166,70 @@ func StaticDir(configFilePath string) string {
 
 // FilePath resolves the absolute path to the management control panel asset.
 func FilePath(configFilePath string) string {
+	return AssetPath(configFilePath, ManagementFileName)
+}
+
+// AssetPath resolves the absolute path to a management static asset.
+func AssetPath(configFilePath string, assetName string) string {
+	assetName = filepath.Base(strings.TrimSpace(assetName))
+	if assetName == "" || assetName == "." {
+		return ""
+	}
 	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
 		cleaned := filepath.Clean(override)
-		if strings.EqualFold(filepath.Base(cleaned), managementAssetName) {
+		if strings.EqualFold(filepath.Base(cleaned), assetName) {
 			return cleaned
 		}
-		return filepath.Join(cleaned, ManagementFileName)
+		return filepath.Join(cleaned, assetName)
 	}
 
 	dir := StaticDir(configFilePath)
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, ManagementFileName)
+	return filepath.Join(dir, assetName)
 }
 
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+	return ensureLatestManagementAsset(ctx, staticDir, managementAssetName, proxyURL, panelRepository, true)
+}
+
+// EnsureLatestCooldownHTML checks the latest cooldown.html asset and updates the local copy when needed.
+func EnsureLatestCooldownHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+	return ensureLatestManagementAsset(ctx, staticDir, cooldownAssetName, proxyURL, panelRepository, false)
+}
+
+func ensureLatestManagementAsset(ctx context.Context, staticDir string, assetName string, proxyURL string, panelRepository string, allowFallback bool) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	staticDir = strings.TrimSpace(staticDir)
-	if staticDir == "" {
-		log.Debug("management asset sync skipped: empty static directory")
+	assetName = filepath.Base(strings.TrimSpace(assetName))
+	if staticDir == "" || assetName == "" || assetName == "." {
+		log.Debug("management asset sync skipped: empty static directory or asset name")
 		return false
 	}
-	localPath := filepath.Join(staticDir, managementAssetName)
+	localPath := filepath.Join(staticDir, assetName)
 
 	_, _, _ = sfGroup.Do(localPath, func() (interface{}, error) {
 		lastUpdateCheckMu.Lock()
 		now := time.Now()
+		lastUpdateCheckTime := lastUpdateCheckByPath[localPath]
 		timeSinceLastAttempt := now.Sub(lastUpdateCheckTime)
 		if !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
 			lastUpdateCheckMu.Unlock()
 			log.Debugf(
-				"management asset sync skipped by throttle: last attempt %v ago (interval %v)",
+				"management asset sync skipped by throttle: asset=%s last attempt %v ago (interval %v)",
+				assetName,
 				timeSinceLastAttempt.Round(time.Second),
 				managementSyncMinInterval,
 			)
 			return nil, nil
 		}
-		lastUpdateCheckTime = now
+		lastUpdateCheckByPath[localPath] = now
 		lastUpdateCheckMu.Unlock()
 
 		localFileMissing := false
@@ -232,16 +257,16 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			localHash = ""
 		}
 
-		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
+		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL, assetName)
 		if err != nil {
-			if localFileMissing {
+			if localFileMissing && allowFallback {
 				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
 				if ensureFallbackManagementHTML(ctx, client, localPath) {
 					return nil, nil
 				}
 				return nil, nil
 			}
-			log.WithError(err).Warn("failed to fetch latest management release information")
+			log.WithError(err).Warnf("failed to fetch latest management release information for %s", assetName)
 			return nil, nil
 		}
 
@@ -252,14 +277,14 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 
 		data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
 		if err != nil {
-			if localFileMissing {
+			if localFileMissing && allowFallback {
 				log.WithError(err).Warn("failed to download management asset, trying fallback page")
 				if ensureFallbackManagementHTML(ctx, client, localPath) {
 					return nil, nil
 				}
 				return nil, nil
 			}
-			log.WithError(err).Warn("failed to download management asset")
+			log.WithError(err).Warnf("failed to download management asset %s", assetName)
 			return nil, nil
 		}
 
@@ -332,9 +357,13 @@ func resolveReleaseURL(repo string) string {
 	return defaultManagementReleaseURL
 }
 
-func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
+func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string, assetName string) (*releaseAsset, string, error) {
 	if strings.TrimSpace(releaseURL) == "" {
 		releaseURL = defaultManagementReleaseURL
+	}
+	assetName = filepath.Base(strings.TrimSpace(assetName))
+	if assetName == "" || assetName == "." {
+		return nil, "", fmt.Errorf("empty management asset name")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseURL, nil)
@@ -368,13 +397,13 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 
 	for i := range release.Assets {
 		asset := &release.Assets[i]
-		if strings.EqualFold(asset.Name, managementAssetName) {
+		if strings.EqualFold(asset.Name, assetName) {
 			remoteHash := parseDigest(asset.Digest)
 			return asset, remoteHash, nil
 		}
 	}
 
-	return nil, "", fmt.Errorf("management asset %s not found in latest release", managementAssetName)
+	return nil, "", fmt.Errorf("management asset %s not found in latest release", assetName)
 }
 
 func downloadAsset(ctx context.Context, client *http.Client, downloadURL string) ([]byte, string, error) {

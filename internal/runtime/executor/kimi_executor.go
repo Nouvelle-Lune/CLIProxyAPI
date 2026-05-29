@@ -171,9 +171,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	var param any
-	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
-	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	if from == sdktranslator.FromString("claude") {
+		out = fixClaudeResponseModel(out, requestedModel)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -290,6 +291,9 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range chunks {
+				if from == sdktranslator.FromString("claude") {
+					chunks[i] = fixClaudeResponseModel(chunks[i], requestedModel)
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
@@ -299,6 +303,9 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range doneChunks {
+			if from == sdktranslator.FromString("claude") {
+				doneChunks[i] = fixClaudeResponseModel(doneChunks[i], requestedModel)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
 			case <-ctx.Done():
@@ -345,8 +352,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	messages = gjson.GetBytes(out, "messages")
 	msgs = messages.Array()
 	pending := make([]string, 0)
-	patched := 0
-	patchedReasoning := 0
 	ambiguous := 0
 	latestReasoning := ""
 	hasLatestReasoning := false
@@ -388,7 +393,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 					return body, fmt.Errorf("kimi executor: failed to set assistant reasoning_content: %w", err)
 				}
 				out = next
-				patchedReasoning++
 			}
 
 			for _, tc := range toolCalls.Array() {
@@ -409,7 +413,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 						return body, fmt.Errorf("kimi executor: failed to set tool_call_id from call_id: %w", err)
 					}
 					out = next
-					patched++
 				}
 			}
 			if toolCallID == "" {
@@ -421,7 +424,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 						return body, fmt.Errorf("kimi executor: failed to infer tool_call_id: %w", err)
 					}
 					out = next
-					patched++
 				} else if len(pending) > 1 {
 					ambiguous++
 				}
@@ -432,12 +434,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		}
 	}
 
-	if patched > 0 || patchedReasoning > 0 {
-		log.WithFields(log.Fields{
-			"patched_tool_messages":      patched,
-			"patched_reasoning_messages": patchedReasoning,
-		}).Debug("kimi executor: normalized tool message fields")
-	}
 	if ambiguous > 0 {
 		log.WithFields(log.Fields{
 			"ambiguous_tool_messages": ambiguous,

@@ -1,6 +1,16 @@
 # Binaries
 cli-proxy-api
+cliproxyapi
+server
 *.exe
+
+# Local build/deploy helpers
+Formula/
+rebuild.sh
+restart.sh
+
+# Local temporary notes
+tmp.*
 
 # Configuration
 config.yaml

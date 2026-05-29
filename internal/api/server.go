@@ -372,6 +372,7 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/cooldown.html", s.serveCooldownPage)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -755,6 +756,33 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
+	c.File(filePath)
+}
+
+func (s *Server) serveCooldownPage(c *gin.Context) {
+	cfg := s.cfg
+	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	staticDir := managementasset.StaticDir(s.configFilePath)
+	if strings.TrimSpace(staticDir) == "" {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	filePath := managementasset.AssetPath(s.configFilePath, managementasset.CooldownFileName)
+	if _, err := os.Stat(filePath); err != nil {
+		if os.IsNotExist(err) {
+			if !managementasset.EnsureLatestCooldownHTML(context.Background(), staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
+		} else {
+			log.WithError(err).Error("failed to stat cooldown page asset")
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+	}
 	c.File(filePath)
 }
 

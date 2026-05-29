@@ -147,12 +147,13 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
+		APIKey         *string                `json:"api-key"`
+		Prefix         *string                `json:"prefix"`
+		BaseURL        *string                `json:"base-url"`
+		ProxyURL       *string                `json:"proxy-url"`
+		Headers        *map[string]string     `json:"headers"`
+		ExcludedModels *[]string              `json:"excluded-models"`
+		Cooldown       *config.CooldownConfig `json:"cooldown"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -211,6 +212,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.Cooldown != nil {
+		entry.Cooldown = body.Value.Cooldown
 	}
 	h.cfg.GeminiKey[targetIndex] = entry
 	h.cfg.SanitizeGeminiKeys()
@@ -307,13 +311,14 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey         *string               `json:"api-key"`
-		Prefix         *string               `json:"prefix"`
-		BaseURL        *string               `json:"base-url"`
-		ProxyURL       *string               `json:"proxy-url"`
-		Models         *[]config.ClaudeModel `json:"models"`
-		Headers        *map[string]string    `json:"headers"`
-		ExcludedModels *[]string             `json:"excluded-models"`
+		APIKey         *string                `json:"api-key"`
+		Prefix         *string                `json:"prefix"`
+		BaseURL        *string                `json:"base-url"`
+		ProxyURL       *string                `json:"proxy-url"`
+		Models         *[]config.ClaudeModel  `json:"models"`
+		Headers        *map[string]string     `json:"headers"`
+		ExcludedModels *[]string              `json:"excluded-models"`
+		Cooldown       *config.CooldownConfig `json:"cooldown"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -366,6 +371,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.Cooldown != nil {
+		entry.Cooldown = body.Value.Cooldown
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry
@@ -606,6 +614,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		Headers        *map[string]string          `json:"headers"`
 		Models         *[]config.VertexCompatModel `json:"models"`
 		ExcludedModels *[]string                   `json:"excluded-models"`
+		Cooldown       *config.CooldownConfig      `json:"cooldown"`
 	}
 	var body struct {
 		Index *int               `json:"index"`
@@ -674,6 +683,9 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.Cooldown != nil {
+		entry.Cooldown = body.Value.Cooldown
 	}
 	normalizeVertexCompatKey(&entry)
 	h.cfg.VertexCompatAPIKey[targetIndex] = entry
@@ -955,13 +967,14 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string              `json:"api-key"`
-		Prefix         *string              `json:"prefix"`
-		BaseURL        *string              `json:"base-url"`
-		ProxyURL       *string              `json:"proxy-url"`
-		Models         *[]config.CodexModel `json:"models"`
-		Headers        *map[string]string   `json:"headers"`
-		ExcludedModels *[]string            `json:"excluded-models"`
+		APIKey         *string                `json:"api-key"`
+		Prefix         *string                `json:"prefix"`
+		BaseURL        *string                `json:"base-url"`
+		ProxyURL       *string                `json:"proxy-url"`
+		Models         *[]config.CodexModel   `json:"models"`
+		Headers        *map[string]string     `json:"headers"`
+		ExcludedModels *[]string              `json:"excluded-models"`
+		Cooldown       *config.CooldownConfig `json:"cooldown"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1021,6 +1034,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.Cooldown != nil {
+		entry.Cooldown = body.Value.Cooldown
 	}
 	normalizeCodexKey(&entry)
 	h.cfg.CodexKey[targetIndex] = entry

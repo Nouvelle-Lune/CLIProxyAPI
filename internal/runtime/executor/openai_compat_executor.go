@@ -199,6 +199,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	if from == sdktranslator.FromString("claude") {
+		out = fixClaudeResponseModel(out, requestedModel)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -431,6 +434,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// OpenAI-compatible streams must use SSE data lines.
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
 			for i := range chunks {
+				if from == sdktranslator.FromString("claude") {
+					chunks[i] = fixClaudeResponseModel(chunks[i], requestedModel)
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
@@ -451,6 +457,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// response.completed events are still emitted exactly once.
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
 			for i := range chunks {
+				if from == sdktranslator.FromString("claude") {
+					chunks[i] = fixClaudeResponseModel(chunks[i], requestedModel)
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
@@ -820,7 +829,6 @@ func normalizeDeepSeekReasoningContent(body []byte) ([]byte, error) {
 
 	msgs := messages.Array()
 	out := body
-	patchedReasoning := 0
 	latestReasoning := ""
 	hasLatestReasoning := false
 
@@ -852,12 +860,7 @@ func normalizeDeepSeekReasoningContent(body []byte) ([]byte, error) {
 				return body, fmt.Errorf("openai compat executor: failed to set assistant reasoning_content: %w", err)
 			}
 			out = next
-			patchedReasoning++
 		}
-	}
-
-	if patchedReasoning > 0 {
-		log.WithField("patched_reasoning_messages", patchedReasoning).Debug("openai compat executor: normalized reasoning_content for tool call messages")
 	}
 
 	return out, nil
