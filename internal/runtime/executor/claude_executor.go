@@ -205,6 +205,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
+	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -231,6 +232,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -257,12 +259,44 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+
+		// If the upstream rejects tool_reference (a Claude Code extension
+		// that some Anthropic-compatible providers do not support), convert
+		// them to standard text blocks and retry once.
+		if isToolReferenceNotSupportedError(b, httpResp.StatusCode) {
+			fixedBody := convertToolReferenceToText(bodyForUpstream)
+			if !bytes.Equal(fixedBody, bodyForUpstream) {
+				if errClose := errBody.Close(); errClose != nil {
+					log.Errorf("response body close error: %v", errClose)
+				}
+				log.WithField("model", requestedModel).Info("retrying with tool_reference converted to text")
+				httpReq, retryErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(fixedBody))
+				if retryErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+					return resp, retryErr
+				}
+				applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+				if errPrepare := e.PrepareRequest(httpReq, auth); errPrepare != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, errPrepare)
+					return resp, errPrepare
+				}
+				httpResp, err = httpClient.Do(httpReq)
+				if err != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, err)
+					return resp, err
+				}
+				bodyForUpstream = fixedBody
+				goto processResponse
+			}
+		}
+
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 		return resp, err
 	}
+processResponse:
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -384,6 +418,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
+	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -410,6 +445,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -436,12 +472,42 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+
+		// If the upstream rejects tool_reference, convert to text and retry once.
+		if isToolReferenceNotSupportedError(b, httpResp.StatusCode) {
+			fixedBody := convertToolReferenceToText(bodyForUpstream)
+			if !bytes.Equal(fixedBody, bodyForUpstream) {
+				if errClose := errBody.Close(); errClose != nil {
+					log.Errorf("response body close error: %v", errClose)
+				}
+				log.WithField("model", baseModel).Info("retrying stream with tool_reference converted to text")
+				httpReq, retryErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(fixedBody))
+				if retryErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+					return nil, retryErr
+				}
+				applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+				if errPrepare := e.PrepareRequest(httpReq, auth); errPrepare != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, errPrepare)
+					return nil, errPrepare
+				}
+				httpResp, err = httpClient.Do(httpReq)
+				if err != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, err)
+					return nil, err
+				}
+				bodyForUpstream = fixedBody
+				goto processStreamResponse
+			}
+		}
+
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
+processStreamResponse:
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -756,6 +822,77 @@ func claudeSystemContentToBlocks(content any, messageIndex int) ([]any, error) {
 	default:
 		return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages[%d].content must be a string or array", messageIndex)
 	}
+}
+
+// isToolReferenceNotSupportedError checks whether an upstream error response
+// indicates that the provider does not support the tool_reference content block
+// type (a Claude Code extension) inside tool_result.content[] arrays.
+func isToolReferenceNotSupportedError(errBody []byte, statusCode int) bool {
+	if statusCode != http.StatusBadRequest {
+		return false
+	}
+	msg := string(errBody)
+	return strings.Contains(msg, "tool_reference") ||
+		strings.Contains(msg, "ContentBlockParamUnion") ||
+		strings.Contains(msg, "unsupported content type")
+}
+
+// convertToolReferenceToText converts Claude Code internal tool_reference
+// content blocks inside tool_result.content[] arrays into standard text blocks.
+// This is used as a fallback when the upstream provider rejects tool_reference.
+func convertToolReferenceToText(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	out := body
+	msgs := messages.Array()
+	for msgIdx := range msgs {
+		msg := msgs[msgIdx]
+		content := msg.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+
+		parts := content.Array()
+		for partIdx := range parts {
+			part := parts[partIdx]
+			if part.Get("type").String() != "tool_result" {
+				continue
+			}
+
+			innerContent := part.Get("content")
+			if !innerContent.IsArray() {
+				continue
+			}
+
+			items := innerContent.Array()
+			var converted []string
+			changed := false
+			for i := range items {
+				item := items[i]
+				if item.IsObject() && item.Get("type").String() == "tool_reference" {
+					toolName := item.Get("tool_name").String()
+					if toolName == "" {
+						changed = true
+						continue
+					}
+					textBlock := []byte(`{"type":"text","text":""}`)
+					textBlock, _ = sjson.SetBytes(textBlock, "text", "[Tool loaded: "+toolName+"]")
+					converted = append(converted, string(textBlock))
+					changed = true
+				} else {
+					converted = append(converted, item.Raw)
+				}
+			}
+			if changed {
+				path := fmt.Sprintf("messages.%d.content.%d.content", msgIdx, partIdx)
+				out, _ = sjson.SetRawBytes(out, path, []byte("["+strings.Join(converted, ",")+"]"))
+			}
+		}
+	}
+	return out
 }
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
