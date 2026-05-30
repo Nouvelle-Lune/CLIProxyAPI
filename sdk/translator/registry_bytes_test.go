@@ -37,6 +37,22 @@ func TestRegistryTranslateNonStreamReturnsBytes(t *testing.T) {
 	}
 }
 
+func TestRegistryHasResponseTransformerMatchesTranslateDirection(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(FormatOpenAI, FormatGemini, nil, ResponseTransform{
+		NonStream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+			return rawJSON
+		},
+	})
+
+	if !registry.HasResponseTransformer(FormatGemini, FormatOpenAI) {
+		t.Fatal("expected provider Gemini responses to be translatable back to OpenAI clients")
+	}
+	if registry.HasResponseTransformer(FormatOpenAI, FormatGemini) {
+		t.Fatal("did not expect the request-registration direction to be reported as a response path")
+	}
+}
+
 func TestRegistryTranslateTokenCountReturnsBytes(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(FormatOpenAI, FormatGemini, nil, ResponseTransform{

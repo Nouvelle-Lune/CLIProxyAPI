@@ -28,6 +28,7 @@ type Params struct {
 	ResponseType     int  // Current response type: 0=none, 1=content, 2=thinking, 3=function
 	ResponseIndex    int  // Index counter for content blocks in the streaming response
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
+	SawToolCall      bool // Persists tool-use state until the terminal usage chunk sets stop_reason.
 
 	// Reverse map: sanitized Gemini function name → original Claude tool name.
 	ToolNameMap map[string]string
@@ -169,6 +170,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude Code API compatibility
 				usedTool = true
+				(*param).(*Params).SawToolCall = true
 				fcName := util.RestoreSanitizedToolName((*param).(*Params).ToolNameMap, functionCallResult.Get("name").String())
 
 				// Handle state transitions when switching to function calls
@@ -221,8 +223,10 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 
 				// Create the message delta template with appropriate stop reason
 				template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-				// Set tool_use stop reason if tools were used in this response
-				if usedTool {
+				// Set tool_use stop reason if tools were used in this response.
+				// Gemini CLI may send the terminal usage chunk after the functionCall chunk,
+				// so the persisted flag is required to keep Claude Code's tool trigger intact.
+				if usedTool || (*param).(*Params).SawToolCall {
 					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 				} else if finish := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
 					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)

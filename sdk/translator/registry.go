@@ -65,13 +65,14 @@ func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byt
 	return rawJSON
 }
 
-// HasResponseTransformer indicates whether a response translator exists.
+// HasResponseTransformer indicates whether a response translator exists for
+// responses moving from the upstream provider format to the client format.
 func (r *Registry) HasResponseTransformer(from, to Format) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if byTarget, ok := r.responses[from]; ok {
-		if _, isOk := byTarget[to]; isOk {
+	if byTarget, ok := r.responses[to]; ok {
+		if _, isOk := byTarget[from]; isOk {
 			return true
 		}
 	}
