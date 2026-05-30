@@ -115,6 +115,8 @@ var oauthToolsToRemove = map[string]bool{}
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
 
+const claudeCodeTaskReminderMarker = "The task tools haven't been used recently."
+
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
@@ -191,7 +193,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	body, err = normalizeClaudeMidConversationSystemMessages(body)
+	body, err = normalizeClaudeMidConversationSystemMessagesForRequest(body, opts.Headers)
 	if err != nil {
 		return resp, err
 	}
@@ -409,7 +411,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	body, err = normalizeClaudeMidConversationSystemMessages(body)
+	body, err = normalizeClaudeMidConversationSystemMessagesForRequest(body, opts.Headers)
 	if err != nil {
 		return nil, err
 	}
@@ -826,6 +828,115 @@ func normalizeClaudeMidConversationSystemMessages(body []byte) ([]byte, error) {
 	return out, nil
 }
 
+func normalizeClaudeMidConversationSystemMessagesForRequest(body []byte, headers http.Header) ([]byte, error) {
+	body, err := dedupeClaudeCodeRepeatedTaskSystemReminders(body)
+	if err != nil {
+		return nil, err
+	}
+	if claudeMidConversationSystemBetaEnabled(headers, body) {
+		return body, nil
+	}
+	return normalizeClaudeMidConversationSystemMessages(body)
+}
+
+func dedupeClaudeCodeRepeatedTaskSystemReminders(body []byte) ([]byte, error) {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() {
+		return body, nil
+	}
+	if !messages.IsArray() {
+		return nil, fmt.Errorf("dedupe claude task reminders: messages must be an array")
+	}
+
+	seen := make(map[string]bool)
+	var deleteIndexes []int
+	messages.ForEach(func(index, message gjson.Result) bool {
+		if message.Get("role").String() != "system" {
+			return true
+		}
+		text, ok := claudeCodeTaskReminderText(message.Get("content"))
+		if !ok {
+			return true
+		}
+		if seen[text] {
+			deleteIndexes = append(deleteIndexes, int(index.Int()))
+			return true
+		}
+		seen[text] = true
+		return true
+	})
+	if len(deleteIndexes) == 0 {
+		return body, nil
+	}
+
+	out := body
+	for i := len(deleteIndexes) - 1; i >= 0; i-- {
+		var err error
+		out, err = sjson.DeleteBytes(out, fmt.Sprintf("messages.%d", deleteIndexes[i]))
+		if err != nil {
+			return nil, fmt.Errorf("dedupe claude task reminders: delete messages.%d: %w", deleteIndexes[i], err)
+		}
+	}
+	return out, nil
+}
+
+func claudeCodeTaskReminderText(content gjson.Result) (string, bool) {
+	switch {
+	case content.Type == gjson.String:
+		text := content.String()
+		if strings.Contains(text, claudeCodeTaskReminderMarker) {
+			return text, true
+		}
+	case content.IsArray():
+		parts := content.Array()
+		if len(parts) != 1 {
+			return "", false
+		}
+		part := parts[0]
+		if part.Get("type").String() != "text" {
+			return "", false
+		}
+		text := part.Get("text").String()
+		if strings.Contains(text, claudeCodeTaskReminderMarker) {
+			return text, true
+		}
+	}
+	return "", false
+}
+
+func claudeMidConversationSystemBetaEnabled(headers http.Header, body []byte) bool {
+	if headers != nil {
+		for _, betaHeader := range headers.Values("Anthropic-Beta") {
+			if containsClaudeMidConversationSystemBeta(betaHeader) {
+				return true
+			}
+		}
+	}
+
+	betas := gjson.GetBytes(body, "betas")
+	if !betas.IsArray() {
+		return false
+	}
+	enabled := false
+	betas.ForEach(func(_, beta gjson.Result) bool {
+		if beta.Type == gjson.String && containsClaudeMidConversationSystemBeta(beta.String()) {
+			enabled = true
+			return false
+		}
+		return true
+	})
+	return enabled
+}
+
+func containsClaudeMidConversationSystemBeta(value string) bool {
+	for _, part := range strings.Split(value, ",") {
+		if strings.HasPrefix(strings.TrimSpace(part), "mid-conversation-system-") {
+			return true
+		}
+	}
+	return false
+}
+
 func collectClaudeTopLevelSystemBlocks(system any) ([]any, error) {
 	if system == nil {
 		return nil, nil
@@ -944,7 +1055,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body, err := normalizeClaudeMidConversationSystemMessages(body)
+	body, err := normalizeClaudeMidConversationSystemMessagesForRequest(body, opts.Headers)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

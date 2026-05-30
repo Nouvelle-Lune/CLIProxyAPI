@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2377,6 +2378,77 @@ func TestNormalizeClaudeMidConversationSystemMessages_MovesArraySystemMessage(t 
 	}
 	if !gjson.GetBytes(out, "system.0.cache_control").Exists() {
 		t.Fatalf("system.0.cache_control should be preserved: %s", string(out))
+	}
+}
+
+func TestNormalizeClaudeMidConversationSystemMessagesForRequest_PreservesWhenHeaderBetaEnabled(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-pro","system":[{"type":"text","text":"top"}],"messages":[{"role":"user","content":"hi"},{"role":"system","content":"runtime tools"},{"role":"assistant","content":"ok"}]}`)
+	headers := http.Header{"Anthropic-Beta": []string{"claude-code-20250219,mid-conversation-system-2026-04-07"}}
+
+	out, err := normalizeClaudeMidConversationSystemMessagesForRequest(body, headers)
+	if err != nil {
+		t.Fatalf("normalizeClaudeMidConversationSystemMessagesForRequest returned error: %v", err)
+	}
+
+	if string(out) != string(body) {
+		t.Fatalf("body should be preserved when mid-conversation-system beta is enabled:\n got %s\nwant %s", string(out), string(body))
+	}
+}
+
+func TestNormalizeClaudeMidConversationSystemMessagesForRequest_PreservesWhenBodyBetaEnabled(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-pro","betas":["mid-conversation-system-2026-04-07"],"system":[{"type":"text","text":"top"}],"messages":[{"role":"user","content":"hi"},{"role":"system","content":"runtime tools"},{"role":"assistant","content":"ok"}]}`)
+
+	out, err := normalizeClaudeMidConversationSystemMessagesForRequest(body, nil)
+	if err != nil {
+		t.Fatalf("normalizeClaudeMidConversationSystemMessagesForRequest returned error: %v", err)
+	}
+
+	if string(out) != string(body) {
+		t.Fatalf("body should be preserved when mid-conversation-system beta is enabled:\n got %s\nwant %s", string(out), string(body))
+	}
+}
+
+func TestNormalizeClaudeMidConversationSystemMessagesForRequest_DedupesRepeatedTaskReminder(t *testing.T) {
+	reminder := "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate."
+	body := []byte(`{"model":"mimo-v2.5-pro","messages":[{"role":"user","content":"hi"},{"role":"system","content":` + strconv.Quote(reminder) + `},{"role":"assistant","content":"ok"},{"role":"system","content":` + strconv.Quote(reminder) + `},{"role":"system","content":"different system"}]}`)
+	headers := http.Header{"Anthropic-Beta": []string{"mid-conversation-system-2026-04-07"}}
+
+	out, err := normalizeClaudeMidConversationSystemMessagesForRequest(body, headers)
+	if err != nil {
+		t.Fatalf("normalizeClaudeMidConversationSystemMessagesForRequest returned error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 4 {
+		t.Fatalf("messages count = %d, want 4; body: %s", got, string(out))
+	}
+	if got := strings.Count(string(out), claudeCodeTaskReminderMarker); got != 1 {
+		t.Fatalf("task reminder count = %d, want 1; body: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content").String(); got != reminder {
+		t.Fatalf("first task reminder should be preserved, got %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.3.content").String(); got != "different system" {
+		t.Fatalf("non-target system message should be preserved, got %q", got)
+	}
+}
+
+func TestNormalizeClaudeMidConversationSystemMessagesForRequest_DedupesArrayTaskReminderBeforeMove(t *testing.T) {
+	reminder := "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate."
+	body := []byte(`{"model":"mimo-v2.5-pro","system":[{"type":"text","text":"top"}],"messages":[{"role":"system","content":[{"type":"text","text":` + strconv.Quote(reminder) + `}]},{"role":"user","content":"hi"},{"role":"system","content":[{"type":"text","text":` + strconv.Quote(reminder) + `}]}]}`)
+
+	out, err := normalizeClaudeMidConversationSystemMessagesForRequest(body, nil)
+	if err != nil {
+		t.Fatalf("normalizeClaudeMidConversationSystemMessagesForRequest returned error: %v", err)
+	}
+
+	if got := strings.Count(string(out), claudeCodeTaskReminderMarker); got != 1 {
+		t.Fatalf("task reminder count = %d, want 1; body: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+		t.Fatalf("system count = %d, want 2; body: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.1.text").String(); got != reminder {
+		t.Fatalf("deduped reminder should be moved once, got %q", got)
 	}
 }
 

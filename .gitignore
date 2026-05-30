@@ -8,12 +8,17 @@ server
 Formula/
 rebuild.sh
 restart.sh
+restore-current.sh
+
+# Restore snapshot (do not commit)
+.restore-snapshot/
 
 # Local temporary notes
 tmp.*
 
 # Configuration
 config.yaml
+cliproxyapi.conf
 .env
 
 # Generated content
@@ -61,3 +66,5 @@ _bmad-output/*
 .DS_Store
 ._*
 .gocache/
+# Ignore Git Commit Genie data
+.gitgenie/**
