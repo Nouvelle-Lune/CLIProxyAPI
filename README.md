@@ -68,6 +68,43 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Why This Fork Exists
+
+This fork exists to keep a reproducible public build of the changes we need on top of upstream CLIProxyAPI. The current focus is Claude Code compatibility with third-party Anthropic-compatible APIs, especially preserving Anthropic's mid-conversation system-message behavior and avoiding duplicated Claude Code task reminders in upstream requests.
+
+The fork is not intended to replace the original project. It tracks the upstream architecture where possible, but carries small, practical changes that are useful for our deployment and easier to verify from source.
+
+## Build from Source
+
+Requirements:
+
+- Go 1.26 or later
+- Git
+
+Build the server binary:
+
+```bash
+git clone https://github.com/Nouvelle-Lune/CLIProxyAPI.git
+cd CLIProxyAPI
+go mod download
+go build -o cli-proxy-api ./cmd/server
+```
+
+Create a local config and run the server:
+
+```bash
+cp config.example.yaml config.yaml
+./cli-proxy-api --config config.yaml
+```
+
+For development, you can also run without creating a binary:
+
+```bash
+go run ./cmd/server --config config.yaml
+```
+
+Before publishing your own fork, keep local secrets out of Git. Do not commit `config.yaml`, `.env`, `auths/`, logs, or other generated runtime data.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
