@@ -582,6 +582,41 @@ func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamFunctionCallDoneWithoutAddedEmitsToolUse(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"read_file","input_schema":{"type":"object","properties":{}}}]}`)
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"README.md\"}"}}`), &param)
+
+	foundStart := false
+	foundArgs := false
+	foundStop := false
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				if data.Get("content_block.type").String() == "tool_use" && data.Get("content_block.name").String() == "read_file" {
+					foundStart = true
+				}
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "input_json_delta" && data.Get("delta.partial_json").String() == `{"path":"README.md"}` {
+					foundArgs = true
+				}
+			case "content_block_stop":
+				foundStop = true
+			}
+		}
+	}
+	if !foundStart || !foundArgs || !foundStop {
+		t.Fatalf("expected tool_use start, arguments delta, and stop; start=%v args=%v stop=%v outputs=%q", foundStart, foundArgs, foundStop, outputs)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamStopSequenceMapping(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)

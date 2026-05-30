@@ -51,7 +51,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 		*param = &ConvertOpenAIResponseToGeminiParams{
 			ToolCallsAccumulator: nil,
 			ContentAccumulator:   strings.Builder{},
-			IsFirstChunk:         false,
+			IsFirstChunk:         true,
 		}
 	}
 
@@ -117,8 +117,6 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					template, _ = sjson.SetBytes(template, "candidates.0.content.role", "model")
 				}
 				(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
-				results = append(results, template)
-				return true
 			}
 
 			var chunkOutputs [][]byte
@@ -149,7 +147,6 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 			if len(chunkOutputs) > 0 {
 				results = append(results, chunkOutputs...)
-				return true
 			}
 
 			// Handle tool calls delta
@@ -201,12 +198,12 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					return true
 				})
 
-				// Don't output anything for tool call deltas - wait for completion
-				return true
+				// Don't output function calls for partial deltas; finish_reason flushes the accumulator.
 			}
 
-			// Handle finish reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+			// Handle finish reason. OpenAI streams commonly include finish_reason:null on
+			// intermediate chunks, which must not flush accumulated tool calls early.
+			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.Type != gjson.Null {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
 				template, _ = sjson.SetBytes(template, "candidates.0.finishReason", geminiFinishReason)
 
