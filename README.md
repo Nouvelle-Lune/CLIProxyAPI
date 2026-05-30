@@ -74,6 +74,8 @@ This fork exists to keep a reproducible public build of the changes we need on t
 
 The fork is not intended to replace the original project. It tracks the upstream architecture where possible, but carries small, practical changes that are useful for our deployment and easier to verify from source.
 
+This repository is published for personal use only. It is provided as-is, with no warranty, support commitment, or responsibility assumed by the maintainer for any usage, deployment, account, billing, data, compliance, or service-availability consequences.
+
 Main differences from upstream in this fork:
 
 - Preserves Claude mid-conversation `role: "system"` messages when the request enables Anthropic's `mid-conversation-system-*` beta.
