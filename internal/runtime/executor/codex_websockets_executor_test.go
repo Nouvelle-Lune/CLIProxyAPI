@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
@@ -554,7 +555,7 @@ func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T
 func TestApplyCodexPromptCacheHeadersSetsLowercaseSessionAndLegacyConversation(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
 
-	_, headers := applyCodexPromptCacheHeaders("openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
+	_, headers := applyCodexPromptCacheHeaders(context.Background(), "openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
 
 	if got := headerValueCaseInsensitive(headers, "session_id"); got != "cache-1" {
 		t.Fatalf("session_id = %s, want cache-1", got)
@@ -564,6 +565,27 @@ func TestApplyCodexPromptCacheHeadersSetsLowercaseSessionAndLegacyConversation(t
 	}
 	if got := headers.Get("Conversation_id"); got != "cache-1" {
 		t.Fatalf("Conversation_id = %s, want cache-1", got)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersOpenAIUsesStableAPIKeyCacheID(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("userApiKey", "test-api-key")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"model":"gpt-5-codex"}`)}
+
+	body, headers := applyCodexPromptCacheHeaders(ctx, "openai", req, []byte(`{"model":"gpt-5-codex"}`))
+
+	expectedKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:test-api-key")).String()
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, expectedKey)
+	}
+	if got := headerValueCaseInsensitive(headers, "session_id"); got != expectedKey {
+		t.Fatalf("session_id = %q, want %q", got, expectedKey)
+	}
+	if got := headers.Get("Conversation_id"); got != expectedKey {
+		t.Fatalf("Conversation_id = %q, want %q", got, expectedKey)
 	}
 }
 
