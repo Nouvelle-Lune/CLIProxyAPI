@@ -246,6 +246,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.ToolCallBlockOpen = false
 
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
+		} else if itemType == "web_search_call" {
+			output = append(output, appendCodexWebSearchCallBlocks(params, itemResult)...)
 		} else if itemType == "reasoning" {
 			if signature := itemResult.Get("encrypted_content").String(); signature != "" {
 				params.ThinkingSignature = signature
@@ -397,6 +399,10 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 				}
 				toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(inputRaw))
 				out, _ = sjson.SetRawBytes(out, "content.-1", toolBlock)
+			case "web_search_call":
+				serverToolBlock, resultBlock := codexWebSearchCallBlocks(item)
+				out, _ = sjson.SetRawBytes(out, "content.-1", serverToolBlock)
+				out, _ = sjson.SetRawBytes(out, "content.-1", resultBlock)
 			}
 			return true
 		})
@@ -498,6 +504,47 @@ func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[strin
 		}
 	}
 	return rev
+}
+
+func appendCodexWebSearchCallBlocks(params *ConvertCodexResponseToClaudeParams, item gjson.Result) []byte {
+	output := append([]byte{}, finalizeCodexThinkingBlock(params)...)
+
+	serverToolBlock, resultBlock := codexWebSearchCallBlocks(item)
+	contentBlockStart := []byte(`{"type":"content_block_start","index":0,"content_block":{}}`)
+	contentBlockStart, _ = sjson.SetBytes(contentBlockStart, "index", params.BlockIndex)
+	contentBlockStart, _ = sjson.SetRawBytes(contentBlockStart, "content_block", serverToolBlock)
+	output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", contentBlockStart, 2)
+
+	contentBlockStop := []byte(`{"type":"content_block_stop","index":0}`)
+	contentBlockStop, _ = sjson.SetBytes(contentBlockStop, "index", params.BlockIndex)
+	output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", contentBlockStop, 2)
+	params.BlockIndex++
+
+	contentBlockStart = []byte(`{"type":"content_block_start","index":0,"content_block":{}}`)
+	contentBlockStart, _ = sjson.SetBytes(contentBlockStart, "index", params.BlockIndex)
+	contentBlockStart, _ = sjson.SetRawBytes(contentBlockStart, "content_block", resultBlock)
+	output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", contentBlockStart, 2)
+
+	contentBlockStop = []byte(`{"type":"content_block_stop","index":0}`)
+	contentBlockStop, _ = sjson.SetBytes(contentBlockStop, "index", params.BlockIndex)
+	output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", contentBlockStop, 2)
+	params.BlockIndex++
+
+	return output
+}
+
+func codexWebSearchCallBlocks(item gjson.Result) ([]byte, []byte) {
+	toolUseID := util.SanitizeClaudeToolID(item.Get("id").String())
+	query := item.Get("action.query").String()
+
+	serverToolBlock := []byte(`{"type":"server_tool_use","id":"","name":"web_search","input":{"query":""}}`)
+	serverToolBlock, _ = sjson.SetBytes(serverToolBlock, "id", toolUseID)
+	serverToolBlock, _ = sjson.SetBytes(serverToolBlock, "input.query", query)
+
+	resultBlock := []byte(`{"type":"web_search_tool_result","tool_use_id":"","content":[]}`)
+	resultBlock, _ = sjson.SetBytes(resultBlock, "tool_use_id", toolUseID)
+
+	return serverToolBlock, resultBlock
 }
 
 func ClaudeTokenCount(_ context.Context, count int64) []byte {

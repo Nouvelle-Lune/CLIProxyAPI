@@ -617,6 +617,178 @@ func TestConvertCodexResponseToClaude_StreamFunctionCallDoneWithoutAddedEmitsToo
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamWebSearchCallEmitsServerToolBlocks(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"深圳天气 2026年5月30日","queries":["深圳天气 2026年5月30日"]}}}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1}}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	foundServerTool := false
+	foundToolResult := false
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() != "content_block_start" {
+				continue
+			}
+			switch data.Get("content_block.type").String() {
+			case "server_tool_use":
+				foundServerTool = true
+				if got := data.Get("content_block.id").String(); got != "ws_123" {
+					t.Fatalf("server_tool_use id = %q, want ws_123", got)
+				}
+				if got := data.Get("content_block.name").String(); got != "web_search" {
+					t.Fatalf("server_tool_use name = %q, want web_search", got)
+				}
+				if got := data.Get("content_block.input.query").String(); got != "深圳天气 2026年5月30日" {
+					t.Fatalf("server_tool_use query = %q", got)
+				}
+			case "web_search_tool_result":
+				foundToolResult = true
+				if got := data.Get("content_block.tool_use_id").String(); got != "ws_123" {
+					t.Fatalf("web_search_tool_result tool_use_id = %q, want ws_123", got)
+				}
+				if !data.Get("content_block.content").IsArray() {
+					t.Fatalf("web_search_tool_result content should be an array: %s", line)
+				}
+			}
+		}
+	}
+
+	if !foundServerTool {
+		t.Fatalf("missing server_tool_use block; outputs=%q", outputs)
+	}
+	if !foundToolResult {
+		t.Fatalf("missing web_search_tool_result block; outputs=%q", outputs)
+	}
+	stopReason, ok := findClaudeStreamStopReason(outputs)
+	if !ok {
+		t.Fatalf("missing stop reason; outputs=%q", outputs)
+	}
+	if stopReason != "end_turn" {
+		t.Fatalf("web_search_call should not force tool_use stop_reason, got %q", stopReason)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamWebSearchCallStreamsQueryAsInputDelta(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"latest Claude web search docs"}}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	events := []string{}
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				switch data.Get("content_block.type").String() {
+				case "server_tool_use":
+					events = append(events, "server_start")
+					if got := data.Get("index").Int(); got != 0 {
+						t.Fatalf("server_tool_use index = %d, want 0", got)
+					}
+					if data.Get("content_block.input").Exists() {
+						t.Fatalf("server_tool_use start block should not contain final input; output=%s", string(out))
+					}
+				case "web_search_tool_result":
+					events = append(events, "result_start")
+					if got := data.Get("index").Int(); got != 1 {
+						t.Fatalf("web_search_tool_result index = %d, want 1", got)
+					}
+				}
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "input_json_delta" {
+					events = append(events, "query_delta")
+					if got := data.Get("index").Int(); got != 0 {
+						t.Fatalf("query delta index = %d, want 0", got)
+					}
+					if got := data.Get("delta.partial_json").String(); got != `{"query":"latest Claude web search docs"}` {
+						t.Fatalf("query delta partial_json = %q", got)
+					}
+				}
+			}
+		}
+	}
+
+	if got, want := strings.Join(events, ","), "server_start,query_delta,result_start"; got != want {
+		t.Fatalf("web search stream events = %s, want %s. Outputs=%q", got, want, outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_WebSearchCallEmitsServerToolBlocks(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_1",
+			"model":"gpt-5.5",
+			"stop_reason":"stop",
+			"usage":{"input_tokens":1,"output_tokens":1},
+			"output":[
+				{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"深圳天气 2026年5月30日","queries":["深圳天气 2026年5月30日"]}},
+				{"type":"message","content":[{"type":"output_text","text":"搜索完成"}]}
+			]
+		}
+	}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := gjson.ParseBytes(out)
+
+	serverTool := parsed.Get("content.0")
+	if got := serverTool.Get("type").String(); got != "server_tool_use" {
+		t.Fatalf("content.0 type = %q, want server_tool_use. Output: %s", got, string(out))
+	}
+	if got := serverTool.Get("id").String(); got != "ws_123" {
+		t.Fatalf("server_tool_use id = %q, want ws_123", got)
+	}
+	if got := serverTool.Get("input.query").String(); got != "深圳天气 2026年5月30日" {
+		t.Fatalf("server_tool_use query = %q", got)
+	}
+
+	result := parsed.Get("content.1")
+	if got := result.Get("type").String(); got != "web_search_tool_result" {
+		t.Fatalf("content.1 type = %q, want web_search_tool_result. Output: %s", got, string(out))
+	}
+	if got := result.Get("tool_use_id").String(); got != "ws_123" {
+		t.Fatalf("web_search_tool_result tool_use_id = %q, want ws_123", got)
+	}
+	if !result.Get("content").IsArray() {
+		t.Fatalf("web_search_tool_result content should be an array. Output: %s", string(out))
+	}
+	if got := parsed.Get("content.2.type").String(); got != "text" {
+		t.Fatalf("content.2 type = %q, want text. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("stop_reason").String(); got != "end_turn" {
+		t.Fatalf("web_search_call should not force tool_use stop_reason, got %q. Output: %s", got, string(out))
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamStopSequenceMapping(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)
