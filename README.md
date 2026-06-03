@@ -12,7 +12,33 @@ In practice, these clients often rely on subtle protocol behavior: mid-conversat
 
 This fork keeps the upstream architecture where possible, but carries practical changes that are useful for my deployment and easier to audit from source.
 
-## What Is Different From Upstream
+## Structural Differences From Upstream
+
+The fork README is a completely different document from the upstream README. Here is a summary of what each section looks like:
+
+| Section | Upstream | Fork |
+|---------|----------|------|
+| **Title** | `CLI Proxy API` + multi-language links | `CLIProxyAPI Personal Fork` |
+| **Sponsor** | 4 sponsors with detailed ad tables (PackyCode, AICodeMirror, BmoPlus, VisionCoder, APIKEY.FUN) | None |
+| **Overview** | Full feature list (16 items) | None |
+| **Getting Started** | Points to `help.router-for.me` docs | None |
+| **Management API** | Points to external docs | None |
+| **Usage Statistics** | CPA Usage Keeper, CPA-Manager-Plus intro | None |
+| **Amp CLI Support** | Full Amp integration guide | None |
+| **SDK Docs** | 4 SDK doc links | None |
+| **Contributing** | Standard contribution guide | None |
+| **Who is with us?** | 18 community projects based on CLIProxyAPI | None |
+| **More choices** | 4 derivative projects | None |
+| **License** | MIT License | None |
+| **Why This Fork Exists** | None | Fork purpose and motivation |
+| **What Is Different** | None | Detailed diff notes (fork-specific + upstream merge changes) |
+| **Build From Source** | None | Full build steps |
+| **Local Files And Secrets** | None | Security reminders |
+| **Upstream** | None | Link to upstream repo |
+
+In short: the fork README is a streamlined personal fork description. It removes all sponsor ads, feature lists, ecosystem project lists, and doc links from upstream, and replaces them with the fork's purpose, difference notes, and build guide. There is almost no overlapping content between the two.
+
+## Fork-Specific Changes
 
 Recent changes in this fork focus on:
 
@@ -24,6 +50,8 @@ Recent changes in this fork focus on:
 - Adding or carrying compatibility fixes around response WebSocket input item deduplication, `count_tokens` auth state handling, model suffix stripping, and provider signature validation.
 - Keeping request logging and local debugging support available for verifying the exact upstream payload sent by the proxy.
 - Adding a small checkpoint helper script for local development snapshots.
+
+## Upstream Changes Carried
 
 As of the latest merge from upstream (`7bb7116e`), this fork also carries the following upstream changes:
 
