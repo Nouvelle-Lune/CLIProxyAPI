@@ -634,34 +634,40 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallEmitsServerToolBlocks(t
 
 	foundServerTool := false
 	foundToolResult := false
+	foundQueryDelta := false
 	for _, out := range outputs {
 		for _, line := range strings.Split(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
 			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
-			if data.Get("type").String() != "content_block_start" {
-				continue
-			}
-			switch data.Get("content_block.type").String() {
-			case "server_tool_use":
-				foundServerTool = true
-				if got := data.Get("content_block.id").String(); got != "ws_123" {
-					t.Fatalf("server_tool_use id = %q, want ws_123", got)
+			switch data.Get("type").String() {
+			case "content_block_start":
+				switch data.Get("content_block.type").String() {
+				case "server_tool_use":
+					foundServerTool = true
+					if got := data.Get("content_block.id").String(); got != "ws_123" {
+						t.Fatalf("server_tool_use id = %q, want ws_123", got)
+					}
+					if got := data.Get("content_block.name").String(); got != "web_search" {
+						t.Fatalf("server_tool_use name = %q, want web_search", got)
+					}
+				case "web_search_tool_result":
+					foundToolResult = true
+					if got := data.Get("content_block.tool_use_id").String(); got != "ws_123" {
+						t.Fatalf("web_search_tool_result tool_use_id = %q, want ws_123", got)
+					}
+					if !data.Get("content_block.content").IsArray() {
+						t.Fatalf("web_search_tool_result content should be an array: %s", line)
+					}
 				}
-				if got := data.Get("content_block.name").String(); got != "web_search" {
-					t.Fatalf("server_tool_use name = %q, want web_search", got)
-				}
-				if got := data.Get("content_block.input.query").String(); got != "深圳天气 2026年5月30日" {
-					t.Fatalf("server_tool_use query = %q", got)
-				}
-			case "web_search_tool_result":
-				foundToolResult = true
-				if got := data.Get("content_block.tool_use_id").String(); got != "ws_123" {
-					t.Fatalf("web_search_tool_result tool_use_id = %q, want ws_123", got)
-				}
-				if !data.Get("content_block.content").IsArray() {
-					t.Fatalf("web_search_tool_result content should be an array: %s", line)
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "input_json_delta" {
+					foundQueryDelta = true
+					partial := gjson.Parse(data.Get("delta.partial_json").String())
+					if got := partial.Get("query").String(); got != "深圳天气 2026年5月30日" {
+						t.Fatalf("input_json_delta query = %q, want %q", got, "深圳天气 2026年5月30日")
+					}
 				}
 			}
 		}
@@ -672,6 +678,9 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallEmitsServerToolBlocks(t
 	}
 	if !foundToolResult {
 		t.Fatalf("missing web_search_tool_result block; outputs=%q", outputs)
+	}
+	if !foundQueryDelta {
+		t.Fatalf("missing input_json_delta with query; outputs=%q", outputs)
 	}
 	stopReason, ok := findClaudeStreamStopReason(outputs)
 	if !ok {

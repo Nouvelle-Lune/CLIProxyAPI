@@ -509,16 +509,37 @@ func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[strin
 func appendCodexWebSearchCallBlocks(params *ConvertCodexResponseToClaudeParams, item gjson.Result) []byte {
 	output := append([]byte{}, finalizeCodexThinkingBlock(params)...)
 
-	serverToolBlock, resultBlock := codexWebSearchCallBlocks(item)
+	toolUseID := util.SanitizeClaudeToolID(item.Get("id").String())
+	query := item.Get("action.query").String()
+
+	// Emit server_tool_use content_block_start WITHOUT input (matches Claude native streaming)
+	startBlock := []byte(`{"type":"server_tool_use","id":"","name":"web_search"}`)
+	startBlock, _ = sjson.SetBytes(startBlock, "id", toolUseID)
+
 	contentBlockStart := []byte(`{"type":"content_block_start","index":0,"content_block":{}}`)
 	contentBlockStart, _ = sjson.SetBytes(contentBlockStart, "index", params.BlockIndex)
-	contentBlockStart, _ = sjson.SetRawBytes(contentBlockStart, "content_block", serverToolBlock)
+	contentBlockStart, _ = sjson.SetRawBytes(contentBlockStart, "content_block", startBlock)
 	output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", contentBlockStart, 2)
+
+	// Stream query as input_json_delta
+	if query != "" {
+		inputJSON := []byte(`{"query":""}`)
+		inputJSON, _ = sjson.SetBytes(inputJSON, "query", query)
+
+		deltaEvent := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+		deltaEvent, _ = sjson.SetBytes(deltaEvent, "index", params.BlockIndex)
+		deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.partial_json", string(inputJSON))
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", deltaEvent, 2)
+	}
 
 	contentBlockStop := []byte(`{"type":"content_block_stop","index":0}`)
 	contentBlockStop, _ = sjson.SetBytes(contentBlockStop, "index", params.BlockIndex)
 	output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", contentBlockStop, 2)
 	params.BlockIndex++
+
+	// Emit web_search_tool_result block
+	resultBlock := []byte(`{"type":"web_search_tool_result","tool_use_id":"","content":[]}`)
+	resultBlock, _ = sjson.SetBytes(resultBlock, "tool_use_id", toolUseID)
 
 	contentBlockStart = []byte(`{"type":"content_block_start","index":0,"content_block":{}}`)
 	contentBlockStart, _ = sjson.SetBytes(contentBlockStart, "index", params.BlockIndex)

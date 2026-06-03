@@ -326,3 +326,106 @@ func TestConvertOpenAIRequestToClaude_IgnoresUserAndBlankAssistantReasoning(t *t
 		t.Fatalf("Expected no extra assistant content for blank reasoning: %s", resultJSON.Get("messages.1.content").Raw)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_ConsecutiveToolResultsMergedIntoSingleUserMessage(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "user", "content": "Do three things"},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"/a\"}"}},
+					{"id": "call_2", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"/b\"}"}},
+					{"id": "call_3", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"/c\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_1", "content": "result 1"},
+			{"role": "tool", "tool_call_id": "call_2", "content": "result 2"},
+			{"role": "tool", "tool_call_id": "call_3", "content": "result 3"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	// Should produce 3 messages: user, assistant, user (merged tool results)
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages (user, assistant, merged-tool-results), got %d. Messages: %s",
+			len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	// Verify the third message is a user message with all 3 tool_results
+	toolResultMsg := messages[2]
+	if got := toolResultMsg.Get("role").String(); got != "user" {
+		t.Fatalf("Expected third message role %q, got %q", "user", got)
+	}
+
+	contentArr := toolResultMsg.Get("content").Array()
+	if len(contentArr) != 3 {
+		t.Fatalf("Expected 3 tool_result blocks in merged user message, got %d. Content: %s",
+			len(contentArr), toolResultMsg.Get("content").Raw)
+	}
+
+	for i, expected := range []string{"call_1", "call_2", "call_3"} {
+		if got := contentArr[i].Get("type").String(); got != "tool_result" {
+			t.Fatalf("Expected content[%d].type %q, got %q", i, "tool_result", got)
+		}
+		if got := contentArr[i].Get("tool_use_id").String(); got != expected {
+			t.Fatalf("Expected content[%d].tool_use_id %q, got %q", i, expected, got)
+		}
+	}
+
+	if got := contentArr[0].Get("content").String(); got != "result 1" {
+		t.Fatalf("Expected first tool result content %q, got %q", "result 1", got)
+	}
+	if got := contentArr[2].Get("content").String(); got != "result 3" {
+		t.Fatalf("Expected third tool result content %q, got %q", "result 3", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ToolResultAfterUserMessageStaysSeparate(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "user", "content": "Hello"},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_1", "content": "file content"},
+			{"role": "assistant", "content": "Here's what I found"},
+			{"role": "user", "content": "Thanks"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	// Should produce 5 messages: user, assistant(tool_use), user(tool_result), assistant, user
+	if len(messages) != 5 {
+		t.Fatalf("Expected 5 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	// Roles should alternate correctly
+	expectedRoles := []string{"user", "assistant", "user", "assistant", "user"}
+	for i, expected := range expectedRoles {
+		if got := messages[i].Get("role").String(); got != expected {
+			t.Fatalf("Expected messages[%d].role %q, got %q", i, expected, got)
+		}
+	}
+
+	// The tool_result user message should not be merged with the final "Thanks" user message
+	if got := messages[2].Get("content.0.type").String(); got != "tool_result" {
+		t.Fatalf("Expected messages[2] to contain tool_result, got %q", got)
+	}
+	if got := messages[4].Get("content.0.text").String(); got != "Thanks" {
+		t.Fatalf("Expected messages[4] text %q, got %q", "Thanks", got)
+	}
+}

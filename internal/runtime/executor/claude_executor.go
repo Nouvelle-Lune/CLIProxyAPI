@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -771,59 +770,81 @@ func validateClaudeStreamingResponse(data []byte) error {
 }
 
 func normalizeClaudeMidConversationSystemMessages(body []byte) ([]byte, error) {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("normalize claude mid-conversation system messages: decode payload: %w", err)
-	}
-
-	messagesRaw, ok := payload["messages"]
-	if !ok {
+	messagesResult := gjson.GetBytes(body, "messages")
+	if !messagesResult.Exists() {
 		return body, nil
 	}
-	messages, ok := messagesRaw.([]any)
-	if !ok {
+	if !messagesResult.IsArray() {
 		return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages must be an array")
 	}
 
-	filteredMessages := make([]any, 0, len(messages))
-	systemBlocks, err := collectClaudeTopLevelSystemBlocks(payload["system"])
-	if err != nil {
-		return nil, err
-	}
-	movedSystem := false
-	for i, messageRaw := range messages {
-		message, ok := messageRaw.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages[%d] must be an object", i)
+	// Scan for system messages within the messages array.
+	// If none exist, return body unchanged to preserve byte-exact prefix for KV cache.
+	hasSystemMessage := false
+	messagesResult.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() == "system" {
+			hasSystemMessage = true
+			return false
 		}
-		role, ok := message["role"].(string)
-		if !ok {
-			return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages[%d].role must be a string", i)
-		}
-		if role != "system" {
-			filteredMessages = append(filteredMessages, messageRaw)
-			continue
-		}
-		blocks, err := claudeSystemContentToBlocks(message["content"], i)
-		if err != nil {
-			return nil, err
-		}
-		systemBlocks = append(systemBlocks, blocks...)
-		movedSystem = true
-	}
-	if !movedSystem {
+		return true
+	})
+	if !hasSystemMessage {
 		return body, nil
 	}
 
-	payload["messages"] = filteredMessages
-	if len(systemBlocks) > 0 {
-		payload["system"] = systemBlocks
-	} else {
-		delete(payload, "system")
+	// Collect system content blocks from mid-conversation system messages
+	// and build a filtered messages array without them.
+	var systemBlocksRaw [][]byte
+	existingSystem := gjson.GetBytes(body, "system")
+	if existingSystem.Exists() {
+		if existingSystem.Type == gjson.String {
+			text := existingSystem.String()
+			if strings.TrimSpace(text) != "" {
+				block := []byte(`{"type":"text","text":""}`)
+				block, _ = sjson.SetBytes(block, "text", text)
+				systemBlocksRaw = append(systemBlocksRaw, block)
+			}
+		} else if existingSystem.IsArray() {
+			for _, item := range existingSystem.Array() {
+				systemBlocksRaw = append(systemBlocksRaw, []byte(item.Raw))
+			}
+		}
 	}
-	out, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("normalize claude mid-conversation system messages: encode payload: %w", err)
+
+	filteredMessages := []byte(`[]`)
+	messagesResult.ForEach(func(_, msg gjson.Result) bool {
+		role := msg.Get("role").String()
+		if role != "system" {
+			filteredMessages, _ = sjson.SetRawBytes(filteredMessages, "-1", []byte(msg.Raw))
+			return true
+		}
+		// Extract system content blocks
+		content := msg.Get("content")
+		if content.Type == gjson.String {
+			text := content.String()
+			if strings.TrimSpace(text) != "" {
+				block := []byte(`{"type":"text","text":""}`)
+				block, _ = sjson.SetBytes(block, "text", text)
+				systemBlocksRaw = append(systemBlocksRaw, block)
+			}
+		} else if content.IsArray() {
+			for _, item := range content.Array() {
+				systemBlocksRaw = append(systemBlocksRaw, []byte(item.Raw))
+			}
+		}
+		return true
+	})
+
+	out := body
+	out, _ = sjson.SetRawBytes(out, "messages", filteredMessages)
+	if len(systemBlocksRaw) > 0 {
+		systemArray := []byte(`[]`)
+		for _, block := range systemBlocksRaw {
+			systemArray, _ = sjson.SetRawBytes(systemArray, "-1", block)
+		}
+		out, _ = sjson.SetRawBytes(out, "system", systemArray)
+	} else {
+		out, _ = sjson.DeleteBytes(out, "system")
 	}
 	return out, nil
 }
@@ -935,39 +956,6 @@ func containsClaudeMidConversationSystemBeta(value string) bool {
 		}
 	}
 	return false
-}
-
-func collectClaudeTopLevelSystemBlocks(system any) ([]any, error) {
-	if system == nil {
-		return nil, nil
-	}
-	switch value := system.(type) {
-	case string:
-		if strings.TrimSpace(value) == "" {
-			return nil, nil
-		}
-		return []any{map[string]any{"type": "text", "text": value}}, nil
-	case []any:
-		return append([]any(nil), value...), nil
-	default:
-		return nil, fmt.Errorf("normalize claude mid-conversation system messages: system must be a string or array")
-	}
-}
-
-func claudeSystemContentToBlocks(content any, messageIndex int) ([]any, error) {
-	switch value := content.(type) {
-	case string:
-		if strings.TrimSpace(value) == "" {
-			return nil, nil
-		}
-		return []any{map[string]any{"type": "text", "text": value}}, nil
-	case []any:
-		return append([]any(nil), value...), nil
-	case nil:
-		return nil, nil
-	default:
-		return nil, fmt.Errorf("normalize claude mid-conversation system messages: messages[%d].content must be a string or array", messageIndex)
-	}
 }
 
 // isToolReferenceNotSupportedError checks whether an upstream error response

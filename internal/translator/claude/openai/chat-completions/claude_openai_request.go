@@ -165,6 +165,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messageIndex := 0
+		lastEmittedRole := ""
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
@@ -280,22 +281,43 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
+				lastEmittedRole = role
 
 			case "tool":
-				// Handle tool result messages conversion
+				// Build the tool_result content block
 				toolCallID := message.Get("tool_call_id").String()
 				toolContentResult := message.Get("content")
 
-				msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
-				msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
+				toolResultBlock := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+				toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "tool_use_id", toolCallID)
 				toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
 				if toolResultContentRaw {
-					msg, _ = sjson.SetRawBytes(msg, "content.0.content", []byte(toolResultContent))
+					toolResultBlock, _ = sjson.SetRawBytes(toolResultBlock, "content", []byte(toolResultContent))
 				} else {
-					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
+					toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "content", toolResultContent)
 				}
+
+				// Claude requires alternating user/assistant roles. Merge consecutive
+				// tool results into the same user message to maintain valid structure
+				// and preserve KV cache prefix stability.
+				if lastEmittedRole == "user" && messageIndex > 0 {
+					lastMsgIdx := messageIndex - 1
+					lastMsgPath := fmt.Sprintf("messages.%d", lastMsgIdx)
+					lastMsg := gjson.GetBytes(out, lastMsgPath)
+					if lastMsg.Get("role").String() == "user" {
+						contentPath := fmt.Sprintf("messages.%d.content.-1", lastMsgIdx)
+						out, _ = sjson.SetRawBytes(out, contentPath, toolResultBlock)
+						// Don't increment messageIndex; still the same message
+						break
+					}
+				}
+
+				// First tool result after an assistant message: create new user message
+				msg := []byte(`{"role":"user","content":[]}`)
+				msg, _ = sjson.SetRawBytes(msg, "content.-1", toolResultBlock)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
+				lastEmittedRole = "user"
 			}
 			return true
 		})
