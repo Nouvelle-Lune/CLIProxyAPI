@@ -25,6 +25,17 @@ Recent changes in this fork focus on:
 - Keeping request logging and local debugging support available for verifying the exact upstream payload sent by the proxy.
 - Adding a small checkpoint helper script for local development snapshots.
 
+As of the latest merge from upstream (`7bb7116e`), this fork also carries the following upstream changes:
+
+- **Claude translation protocol fixes**: OpenAI tool message merging for role alternation compliance, JSON key ordering preservation via gjson/sjson for KV cache stability, and Codex `web_search_call` streaming protocol alignment (`364aa229`).
+- **Runtime auth removal**: `Manager.Remove` for deleting runtime auth and unscheduling associated tasks (`55440f0a`).
+- **Cloudflare challenge retry**: Progressive rate-limiting cooldown for 403 Cloudflare challenges instead of hard credential suspension (`45f58d4f`, `77061aad`).
+- **Codex fixes**: Avoid replaying orphan tool calls (`17af0891`), handle non-empty reasoning and content items (`0e3c809c`), cache reasoning replay items (`603a08fc`).
+- **Gemini system role normalization**: Message-level system roles normalized for Gemini provider (`68282c4a`).
+- **uTLS HTTP client enhancement**: Context-aware RoundTripper for protected hosts with Cloudflare bypass (`35ab084f`).
+- **Home auth refresh fix**: Parse Home refresh auth envelopes so refreshed access tokens are used correctly (`c9dc6bd6`).
+- **WebSocket input ID dedup**: Keep referenced tool calls when deduplicating websocket input IDs (`9c024540`).
+
 This is not meant to be a general-purpose replacement for upstream CLIProxyAPI. It is a personal working fork with targeted behavior changes.
 
 ## Build From Source
